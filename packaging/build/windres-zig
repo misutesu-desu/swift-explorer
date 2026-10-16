@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Stand-in for GNU windres when cross-compiling the Windows build from another OS.
+# winresource calls it as: windres [-I<dir>] [--target <bfd>] <input.rc> <output.o>
+# It compiles the .rc with `zig rc` into a COFF object, so the exe keeps its icon.
+# The architecture comes from CARGO_CFG_TARGET_ARCH, which cargo sets for build scripts.
+set -euo pipefail
+
+zig_rc=(${ZIG_CMD:-python3 -m ziglang} rc)
+case "${CARGO_CFG_TARGET_ARCH:-x86_64}" in
+    x86_64) arch=x86_64 ;;
+    x86) arch=x86 ;;
+    aarch64) arch=aarch64 ;;
+    *) echo "windres-zig: unsupported architecture ${CARGO_CFG_TARGET_ARCH}" >&2; exit 1 ;;
+esac
+
+includes=()
+files=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -I) includes+=(/i "$2"); shift ;;
+        -I*) includes+=(/i "${1#-I}") ;;
+        --target) shift ;;
+        *) files+=("$1") ;;
+    esac
+    shift
+done
+[ ${#files[@]} -eq 2 ] || { echo "usage: windres-zig [-I dir] [--target t] input.rc output.o" >&2; exit 1; }
+
+exec "${zig_rc[@]}" /:output-format coff /:target "$arch" "${includes[@]}" /fo "${files[1]}" -- "${files[0]}"

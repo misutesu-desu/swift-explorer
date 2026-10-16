@@ -202,6 +202,7 @@ enum Dialog {
     ConfirmDelete { paths: Vec<PathBuf> },
     Conflict { files: Vec<PathBuf>, dest: PathBuf, cut: bool, names: Vec<String> },
     Help,
+    Properties(Box<crate::properties::Properties>),
 }
 
 enum UndoOp {
@@ -428,7 +429,7 @@ fn pal(dark: bool) -> Pal {
             strip: c.crust,
             nav: c.mantle,
             field: c.surface,
-            field_stroke: if dark { Stroke::NONE } else { Stroke::new(1.0, c.border) },
+            field_stroke: if dark { Stroke::NONE } else { Stroke::new(1.0_f32, c.border) },
             line: c.border,
             content: c.base,
             status: c.base,
@@ -463,7 +464,7 @@ fn pal(dark: bool) -> Pal {
             strip: Color32::from_rgb(232, 232, 232),
             nav: Color32::from_rgb(249, 249, 249),
             field: Color32::from_rgb(255, 255, 255),
-            field_stroke: Stroke::new(1.0, Color32::from_rgb(229, 229, 229)),
+            field_stroke: Stroke::new(1.0_f32, Color32::from_rgb(229, 229, 229)),
             line: Color32::from_rgb(229, 229, 229),
             content: Color32::from_rgb(255, 255, 255),
             status: Color32::from_rgb(255, 255, 255),
@@ -540,20 +541,20 @@ fn apply_theme(ctx: &egui::Context, accent: Color32, theme: u8) {
             v.hyperlink_color = accent;
             let p = pal(dark);
             v.selection.bg_fill = p.sel;
-            v.selection.stroke = Stroke::new(1.0, c.text);
+            v.selection.stroke = Stroke::new(1.0_f32, c.text);
             v.window_corner_radius = CornerRadius::same(8);
             v.menu_corner_radius = CornerRadius::same(8);
-            v.window_stroke = Stroke::new(1.0, c.popup_stroke);
+            v.window_stroke = Stroke::new(1.0_f32, c.popup_stroke);
             v.striped = false;
             let w = &mut v.widgets;
             for wv in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
                 wv.corner_radius = CornerRadius::same(5);
             }
             // Gezinti bölmesinin sağındaki ayraç ve menü ayraçları
-            w.noninteractive.bg_stroke = Stroke::new(1.0, c.divider);
+            w.noninteractive.bg_stroke = Stroke::new(1.0_f32, c.divider);
             w.inactive.weak_bg_fill = c.button;
             w.inactive.bg_fill = w.inactive.weak_bg_fill;
-            w.inactive.bg_stroke = Stroke::new(1.0, c.button_stroke);
+            w.inactive.bg_stroke = Stroke::new(1.0_f32, c.button_stroke);
             w.hovered.weak_bg_fill = p.hover;
             w.hovered.bg_fill = w.hovered.weak_bg_fill;
             w.hovered.bg_stroke = Stroke::NONE;
@@ -678,7 +679,7 @@ fn caption_button(ui: &mut egui::Ui, kind: Caption) -> egui::Response {
 
 /// Segoe Fluent Icons glif kodları (Explorer'ın kullandıkları)
 #[cfg(windows)]
-mod g {
+pub(crate) mod g {
     pub const BACK: &str = "\u{E72B}";
     pub const FORWARD: &str = "\u{E72A}";
     pub const UP: &str = "\u{E74A}";
@@ -711,7 +712,7 @@ mod g {
 
 /// Fluent UI System Icons glif kodları (assets/fluent-icons.ttf, MIT)
 #[cfg(not(windows))]
-mod g {
+pub(crate) mod g {
     pub const BACK: &str = "\u{F15B}";
     pub const FORWARD: &str = "\u{F181}";
     pub const UP: &str = "\u{F19B}";
@@ -749,7 +750,7 @@ const NATIVE_MENU: bool = cfg!(windows);
 const HOME_SHELL: &str = "::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}";
 const NETWORK_SHELL: &str = "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}";
 
-fn fluent_font(size: f32) -> egui::FontId {
+pub(crate) fn fluent_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(FLUENT.into()))
 }
 
@@ -897,10 +898,10 @@ fn paint_fallback(painter: &egui::Painter, rect: Rect, is_dir: bool) {
         painter.rect_filled(body, 2.5, Color32::from_rgb(240, 190, 70));
     } else {
         let page = Rect::from_center_size(r.center(), egui::vec2(r.width() * 0.72, r.height()));
-        painter.rect(page, 2.0, Color32::from_gray(245), Stroke::new(1.0, Color32::from_gray(150)), egui::StrokeKind::Inside);
+        painter.rect(page, 2.0, Color32::from_gray(245), Stroke::new(1.0_f32, Color32::from_gray(150)), egui::StrokeKind::Inside);
         for k in 1..4 {
             let y = page.top() + page.height() * (0.25 + 0.18 * k as f32);
-            painter.line_segment([egui::pos2(page.left() + page.width() * 0.2, y), egui::pos2(page.right() - page.width() * 0.2, y)], Stroke::new(1.0, Color32::from_gray(170)));
+            painter.line_segment([egui::pos2(page.left() + page.width() * 0.2, y), egui::pos2(page.right() - page.width() * 0.2, y)], Stroke::new(1.0_f32, Color32::from_gray(170)));
         }
     }
 }
@@ -936,7 +937,7 @@ fn display_name(e: &Entry, show_ext: bool) -> String {
     }
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     let n = name.trim();
     !n.is_empty() && !n.chars().any(|c| "\\/:*?\"<>|".contains(c)) && n != "." && n != ".."
 }
@@ -966,7 +967,7 @@ fn short(s: &str, max: usize) -> String {
 fn drop_target(ui: &egui::Ui, resp: &egui::Response, target: &Path, accent: Color32, actions: &mut Vec<Action>) {
     if let Some(p) = resp.dnd_hover_payload::<DragPaths>() {
         if !p.0.iter().any(|s| s == target || target.starts_with(s)) {
-            ui.painter().rect_stroke(resp.rect.expand(1.0), 4.0, Stroke::new(2.0, accent), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(resp.rect.expand(1.0), 4.0, Stroke::new(2.0_f32, accent), egui::StrokeKind::Inside);
         }
     }
     if let Some(p) = resp.dnd_release_payload::<DragPaths>() {
@@ -1678,7 +1679,22 @@ impl App {
                     self.toast(crate::i18n::tf("{} başlatılamadı", &[&name]), true);
                 }
             }
-            Action::Properties(p) => win::show_properties(&p),
+            Action::Properties(p) => {
+                // Seçili öğelerden biri için istendiyse hepsinin toplamı gösterilir
+                let mut paths = self.tab().selected_paths();
+                if !paths.contains(&p) {
+                    paths = vec![p];
+                }
+                let entry = self.tab().entries.iter().find(|e| paths.len() == 1 && e.path == paths[0]).cloned();
+                let tn = match entry {
+                    Some(e) => type_name_cached(&mut self.type_names, &e),
+                    None => crate::i18n::t(if paths.first().is_some_and(|p| p.is_dir()) { "Dosya klasörü" } else { "Dosya" }).into(),
+                };
+                match crate::properties::Properties::new(paths, tn, &ctx) {
+                    Some(pr) => self.dialog = Dialog::Properties(Box::new(pr)),
+                    None => self.toast(crate::i18n::t("Özellikler gösterilemedi"), true),
+                }
+            }
             Action::ShowInExplorer(p) => win::show_in_explorer(&p),
             Action::OpenWith(p) => win::open_with(&p),
             Action::ShellMenu { extended } => {
@@ -1870,7 +1886,7 @@ impl App {
                 } else if i + 1 < n && i + 1 != self.active {
                     // Etkin olmayan sekmeler arasında ince ayraç
                     let x = rect.right() - 0.5;
-                    painter.vline(x, rect.center().y - 8.0..=rect.center().y + 6.0, Stroke::new(1.0, p.line));
+                    painter.vline(x, rect.center().y - 8.0..=rect.center().y + 6.0, Stroke::new(1.0_f32, p.line));
                 }
                 let icon = Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(16.0));
                 if path.as_os_str() == THIS_PC || path.as_os_str().is_empty() || path.is_absolute() {
@@ -2296,7 +2312,7 @@ impl App {
             ui.spacing_mut().interact_size.y = 32.0;
             let sep = |ui: &mut egui::Ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 24.0), Sense::hover());
-                ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, p.line));
+                ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0_f32, p.line));
             };
             let tool = |ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str| flat_icon(ui, glyph, egui::vec2(40.0, 32.0), 16.0, enabled).on_hover_text(tip).clicked();
             // Metinli menü düğmesi (Yeni ⌄, Sırala ⌄, Görünüm ⌄)
@@ -2593,7 +2609,7 @@ impl App {
         let line = pal_of(ui).line;
         let separator = |ui: &mut egui::Ui| {
             let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 23.0), Sense::hover());
-            ui.painter().hline(r.left() + 12.0..=r.right() - 12.0, r.center().y, Stroke::new(1.0, line));
+            ui.painter().hline(r.left() + 12.0..=r.right() - 12.0, r.center().y, Stroke::new(1.0_f32, line));
         };
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -2808,7 +2824,7 @@ impl App {
                             // Explorer: %90 dolu olunca kırmızı
                             let fill = if used > 0.9 { Color32::from_rgb(196, 43, 28) } else { accent };
                             ui.painter().rect_filled(Rect::from_min_size(bar.min, egui::vec2(bar.width() * used.clamp(0.0, 1.0), bar.height())), 0.0, fill);
-                            ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0, Color32::from_rgb(188, 188, 188)), egui::StrokeKind::Inside);
+                            ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(188, 188, 188)), egui::StrokeKind::Inside);
                             let info = crate::i18n::tf("{} boş, {} toplam", &[&fsutil::format_size(d.free), &fsutil::format_size(d.total)]);
                             ui.painter().text(egui::pos2(x, rect.top() + 45.0), Align2::LEFT_CENTER, info, egui::FontId::proportional(13.0), p.weak);
                         }
@@ -3063,7 +3079,7 @@ fn drop_target_p(painter: &egui::Painter, resp: &egui::Response, target: &Path, 
     let mut hovering = false;
     if let Some(p) = resp.dnd_hover_payload::<DragPaths>() {
         if !p.0.iter().any(|s| s == target || target.starts_with(s)) {
-            painter.rect(resp.rect, 4.0, accent.gamma_multiply(0.18), Stroke::new(1.5, accent), egui::StrokeKind::Inside);
+            painter.rect(resp.rect, 4.0, accent.gamma_multiply(0.18), Stroke::new(1.5_f32, accent), egui::StrokeKind::Inside);
             hovering = true;
         }
     }
@@ -3190,7 +3206,7 @@ impl App {
             if bg.dragged() {
                 if let Some(now) = ui.input(|i| i.pointer.latest_pos()) {
                     let r = Rect::from_two_pos(start, now);
-                    ui.painter().rect(r, 2.0, accent.gamma_multiply(0.15), Stroke::new(1.0, accent), egui::StrokeKind::Inside);
+                    ui.painter().rect(r, 2.0, accent.gamma_multiply(0.15), Stroke::new(1.0_f32, accent), egui::StrokeKind::Inside);
                     let hits: Vec<usize> = self.item_rects.iter().filter(|(_, rr)| rr.intersects(r)).map(|(i, _)| *i).collect();
                     let t = self.tab();
                     if !ui.input(|i| i.modifiers.ctrl) {
@@ -3380,7 +3396,7 @@ impl App {
                     let resp = row.response();
                     item_rects.push((idx, resp.rect));
                     if t.cursor == Some(idx) && !selected && t.selection.is_empty() {
-                        painter.rect_stroke(resp.rect.shrink(1.0), 4.0, Stroke::new(1.0, focus_line), egui::StrokeKind::Inside);
+                        painter.rect_stroke(resp.rect.shrink(1.0), 4.0, Stroke::new(1.0_f32, focus_line), egui::StrokeKind::Inside);
                     }
                     handle_item_click(t, &resp, r, idx, selected, &e, actions);
                     if e.is_dir {
@@ -3511,7 +3527,7 @@ impl App {
                             painter.rect_filled(rect, 4.0, pl.hover);
                         }
                         if t.cursor == Some(idx) && !selected && t.selection.is_empty() {
-                            painter.rect_stroke(rect, 4.0, Stroke::new(1.0, pl.line), egui::StrokeKind::Inside);
+                            painter.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pl.line), egui::StrokeKind::Inside);
                         }
                         // Görsel
                         let img_rect = Rect::from_min_size(rect.min + egui::vec2((tile_w - size) / 2.0, 8.0), Vec2::splat(size));
@@ -3524,7 +3540,7 @@ impl App {
                                 let r = fit_rect(tex.size_vec2(), img_rect);
                                 painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
                                 if thumb && !icon_only {
-                                    painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_black_alpha(40)), egui::StrokeKind::Outside);
+                                    painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_black_alpha(40)), egui::StrokeKind::Outside);
                                 }
                             }
                             Img::Failed => paint_fallback(&painter, img_rect, e.is_dir),
@@ -3712,7 +3728,7 @@ impl App {
             ui.spacing_mut().item_spacing.x = 8.0;
             let bar = |ui: &mut egui::Ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), Sense::hover());
-                ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, p.text));
+                ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0_f32, p.text));
             };
             let t = &self.tabs[self.active];
             let count = if t.is_pc() { self.drives.lock().unwrap().len() } else if t.is_home() { 0 } else { t.view.len() };
@@ -3750,7 +3766,7 @@ impl App {
                 let toggle = |ui: &mut egui::Ui, glyph: &str, on: bool| {
                     let (rect, r) = ui.allocate_exact_size(egui::vec2(26.0, 20.0), Sense::click());
                     if on {
-                        ui.painter().rect(rect, 3.0, p.nav_sel, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                        ui.painter().rect(rect, 3.0, p.nav_sel, Stroke::new(1.0_f32, p.line), egui::StrokeKind::Inside);
                     } else if r.hovered() {
                         ui.painter().rect_filled(rect, 3.0, p.hover);
                     }
@@ -3846,7 +3862,7 @@ impl App {
         if hovering_files && !t.is_home() && t.search.is_none() {
             let rect = ctx.screen_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("os_drop")));
-            painter.rect(rect.shrink(6.0), 10.0, self.accent.gamma_multiply(0.08), Stroke::new(2.0, self.accent), egui::StrokeKind::Inside);
+            painter.rect(rect.shrink(6.0), 10.0, self.accent.gamma_multiply(0.08), Stroke::new(2.0_f32, self.accent), egui::StrokeKind::Inside);
             painter.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tf("\"{}\" klasörüne kopyalamak için bırakın", &[&path_label(&t.path)]), egui::FontId::proportional(20.0), self.accent);
         }
     }
@@ -3929,6 +3945,25 @@ impl App {
                         let j = fsutil::spawn_transfer(std::mem::take(files), dest.clone(), *cut, c, ctx.clone());
                         self.push_job(j, true);
                     }
+                }
+            }
+            Dialog::Properties(pr) => {
+                let images = &mut self.images;
+                let out = pr.show(ctx, &mut |ui, path, is_dir, ext, size| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+                    draw_icon(ui.painter(), images, path, is_dir, ext, rect);
+                });
+                if out.close {
+                    keep = false;
+                }
+                if let Some((from, to)) = out.renamed {
+                    self.undo.push(UndoOp::Rename { from, to: to.clone() });
+                    self.reload_active(Some(to));
+                } else if out.refresh {
+                    self.reload_active(None);
+                }
+                if let Some(e) = out.error {
+                    self.toast(e, true);
                 }
             }
             Dialog::Help => {
@@ -4166,7 +4201,7 @@ impl eframe::App for App {
         // solda gezinti bölmesi, altta durum çubuğu
         let pl = pal(ctx.style().visuals.dark_mode);
         let hline = |ctx: &egui::Context, rect: Rect| {
-            ctx.layer_painter(egui::LayerId::background()).hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, pl.line));
+            ctx.layer_painter(egui::LayerId::background()).hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, pl.line));
         };
         egui::TopBottomPanel::top("tabs").exact_height(TITLE_H).frame(egui::Frame::new().fill(pl.strip).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 })).show_separator_line(false).show(ctx, |ui| {
             self.tab_bar(ui, &mut actions);

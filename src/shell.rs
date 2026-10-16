@@ -131,8 +131,10 @@ pub fn type_name(ext: &str) -> String {
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
         );
-        let len = info.szTypeName.iter().position(|&c| c == 0).unwrap_or(0);
-        String::from_utf16_lossy(&info.szTypeName[..len])
+        // 32 bit Windows'ta yapı "packed"; alana referans almak yerine değeri kopyalarız
+        let type_name = info.szTypeName;
+        let len = type_name.iter().position(|&c| c == 0).unwrap_or(0);
+        String::from_utf16_lossy(&type_name[..len])
     }
 }
 

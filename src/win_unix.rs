@@ -104,8 +104,28 @@ fn file_manager_call(method: &str, path: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-pub fn show_properties(path: &Path) {
-    file_manager_call("ShowItemProperties", path);
+/// Dosyanın MIME türü: içeriğe bakan `xdg-mime`, olmazsa uzantıdan
+pub fn mime_of(path: &Path) -> Option<String> {
+    xdg_mime(&["query", "filetype", &path.display().to_string()]).or_else(|| mime_guess::from_path(path).first_raw().map(String::from))
+}
+
+fn xdg_mime(args: &[&str]) -> Option<String> {
+    let out = host_command("xdg-mime").args(args).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !s.is_empty()).then_some(s)
+}
+
+/// Bir MIME türünün varsayılan uygulamasının `.desktop` kimliği
+pub fn default_app_id(mime: &str) -> Option<String> {
+    xdg_mime(&["query", "default", mime])
+}
+
+/// Dosya türünü açan varsayılan uygulama: `xdg-mime` ile bulunur, adı `.desktop` dosyasından okunur
+pub fn default_app(path: &Path) -> Option<crate::properties::AppInfo> {
+    let mime = mime_of(path)?;
+    let id = default_app_id(&mime)?;
+    let name = crate::desktop_apps::app_name(&id).unwrap_or_else(|| id.trim_end_matches(".desktop").to_string());
+    Some(crate::properties::AppInfo { name, exe: None })
 }
 
 pub fn open_with(path: &Path) {

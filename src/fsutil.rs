@@ -452,6 +452,125 @@ pub fn dir_size(dir: &Path, cancel: &AtomicBool) -> u64 {
     total + subdirs.par_iter().map(|d| dir_size(d, cancel)).sum::<u64>()
 }
 
+// ---------------------------------------------------------------- özellikler penceresi
+
+/// Özellikler penceresi için bir ağacın toplam boyutu ve öğe sayıları; arka planda dolar
+#[derive(Default)]
+pub struct TreeStats {
+    pub size: AtomicU64,
+    /// Diskte kapladığı yer (Linux'ta blok sayısından); diğer sistemlerde `size` ile aynı
+    pub on_disk: AtomicU64,
+    pub files: AtomicU64,
+    pub dirs: AtomicU64,
+    pub done: AtomicBool,
+    pub cancel: AtomicBool,
+    /// Windows'ta diskteki yer küme boyutuna yuvarlanır (0: yuvarlama yok)
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub cluster: u64,
+}
+
+impl TreeStats {
+    pub fn with_cluster(cluster: u64) -> TreeStats {
+        TreeStats { cluster, ..Default::default() }
+    }
+}
+
+/// `len` baytın `cluster` boyutlu kümelerde kapladığı yer
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn round_to_cluster(len: u64, cluster: u64) -> u64 {
+    if cluster == 0 { len } else { len.div_ceil(cluster) * cluster }
+}
+
+/// `path` bir dosyaysa onu, klasörse içindekileri sayar. Sembolik bağlantılar izlenmez.
+pub fn scan_tree(path: &Path, st: &TreeStats) {
+    let Ok(md) = fs::symlink_metadata(path) else { return };
+    if md.is_dir() {
+        scan_dir(path, st);
+    } else {
+        add_file(&md, st);
+    }
+}
+
+fn add_file(md: &fs::Metadata, st: &TreeStats) {
+    st.files.fetch_add(1, Relaxed);
+    st.size.fetch_add(md.len(), Relaxed);
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        st.on_disk.fetch_add(md.blocks() * 512, Relaxed);
+    }
+    #[cfg(windows)]
+    st.on_disk.fetch_add(round_to_cluster(md.len(), st.cluster), Relaxed);
+}
+
+fn scan_dir(dir: &Path, st: &TreeStats) {
+    if st.cancel.load(Relaxed) {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut subdirs = Vec::new();
+    for de in rd.flatten() {
+        let Ok(ft) = de.file_type() else { continue };
+        if ft.is_dir() {
+            st.dirs.fetch_add(1, Relaxed);
+            subdirs.push(de.path());
+        } else if let Ok(md) = de.metadata() {
+            add_file(&md, st);
+        }
+    }
+    subdirs.par_iter().for_each(|d| scan_dir(d, st));
+}
+
+/// "rwxr-xr-x" biçimi; özel bitler (setuid, setgid, sticky) ls gibi gösterilir
+#[cfg(not(windows))]
+pub fn mode_string(mode: u32) -> String {
+    let bit = |m: u32, c: char| if mode & m != 0 { c } else { '-' };
+    // Çalıştırma hanesi: özel bit varsa s/t (çalıştırılabilirse küçük, değilse büyük harf)
+    let exec = |x: u32, special: u32, lower: char| match (mode & x != 0, mode & special != 0) {
+        (true, true) => lower,
+        (false, true) => lower.to_ascii_uppercase(),
+        (true, false) => 'x',
+        (false, false) => '-',
+    };
+    [
+        bit(0o400, 'r'),
+        bit(0o200, 'w'),
+        exec(0o100, 0o4000, 's'),
+        bit(0o040, 'r'),
+        bit(0o020, 'w'),
+        exec(0o010, 0o2000, 's'),
+        bit(0o004, 'r'),
+        bit(0o002, 'w'),
+        exec(0o001, 0o1000, 't'),
+    ]
+    .iter()
+    .collect()
+}
+
+#[cfg(not(windows))]
+pub fn user_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut res) };
+    if rc != 0 || res.is_null() {
+        return None;
+    }
+    Some(unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }.to_string_lossy().into_owned())
+}
+
+#[cfg(not(windows))]
+pub fn group_name(gid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe { libc::getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), buf.len(), &mut res) };
+    if rc != 0 || res.is_null() {
+        return None;
+    }
+    Some(unsafe { std::ffi::CStr::from_ptr(grp.gr_name) }.to_string_lossy().into_owned())
+}
+
 // ---------------------------------------------------------------- işler (kopyala/taşı/sil/boyut)
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -872,6 +991,46 @@ pub fn read_preview(path: &Path) -> PreviewData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_rounding() {
+        assert_eq!(round_to_cluster(0, 4096), 0);
+        assert_eq!(round_to_cluster(1, 4096), 4096);
+        assert_eq!(round_to_cluster(4096, 4096), 4096);
+        assert_eq!(round_to_cluster(12_591, 4096), 16_384);
+        assert_eq!(round_to_cluster(5, 0), 5);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn mode_strings() {
+        assert_eq!(mode_string(0o755), "rwxr-xr-x");
+        assert_eq!(mode_string(0o644), "rw-r--r--");
+        assert_eq!(mode_string(0o000), "---------");
+        assert_eq!(mode_string(0o4755), "rwsr-xr-x");
+        assert_eq!(mode_string(0o4644), "rwSr--r--");
+        assert_eq!(mode_string(0o1777), "rwxrwxrwt");
+        assert_eq!(mode_string(0o1776), "rwxrwxrwT");
+    }
+
+    #[test]
+    fn tree_stats_count_files_dirs_and_size() {
+        let root = std::env::temp_dir().join(format!("swift-explorer-props-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("one.txt"), [0u8; 10]).unwrap();
+        fs::write(root.join("a/two.txt"), [0u8; 20]).unwrap();
+        fs::write(root.join("a/b/three.txt"), [0u8; 30]).unwrap();
+        let st = TreeStats::default();
+        scan_tree(&root, &st);
+        assert_eq!(st.files.load(Relaxed), 3);
+        assert_eq!(st.dirs.load(Relaxed), 2);
+        assert_eq!(st.size.load(Relaxed), 60);
+        let single = TreeStats::default();
+        scan_tree(&root.join("one.txt"), &single);
+        assert_eq!((single.files.load(Relaxed), single.dirs.load(Relaxed), single.size.load(Relaxed)), (1, 0, 10));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// Önceki (bellek ayıran) sürüm: yenisi bununla birebir aynı sırayı vermeli
     fn natural_cmp_reference(a: &str, b: &str) -> Ordering {

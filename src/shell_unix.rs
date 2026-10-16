@@ -126,6 +126,17 @@ pub fn shell_image(path: &Path, size: i32, icon_only: bool) -> Option<egui::Colo
     load_icon(&find_icon(&[&exact, generic, "text-x-generic", "unknown"], size)?, size)
 }
 
+/// Bir uygulamanın ikonu (`.desktop` dosyasındaki `Icon=`: tema adı ya da mutlak yol); bulunamazsa genel uygulama ikonu
+pub fn app_icon(icon: Option<&str>, size: i32) -> Option<egui::ColorImage> {
+    let path = match icon {
+        Some(i) if i.starts_with('/') => Some(PathBuf::from(i)),
+        Some(i) => find_icon(&[i], size),
+        None => None,
+    };
+    let path = path.filter(|p| p.exists()).or_else(|| find_icon(&["application-x-executable", "application-default-icon"], size))?;
+    load_icon(&path, size)
+}
+
 /// "PNG dosyası" gibi tür adı
 pub fn type_name(ext: &str) -> String {
     if ext.is_empty() {

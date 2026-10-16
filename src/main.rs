@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(not(windows))]
+mod desktop_apps;
 mod fsutil;
 mod i18n;
 mod images;
+mod properties;
 mod scheme;
 #[cfg(feature = "screenshot")]
 mod screenshot;

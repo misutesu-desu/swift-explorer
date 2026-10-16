@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW, GetFileAttributesW, GetLogicalDrives, GetVolumeInformationW, SetFileAttributesW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ShellExecuteExW, SHELLEXECUTEINFOW};
 
 const CREATE_NEW_CONSOLE: u32 = 0x10;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -84,25 +84,116 @@ pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     (ok != 0).then_some((avail, total))
 }
 
-/// Windows'un kendi "Özellikler" penceresini açar.
-pub fn show_properties(path: &Path) {
+/// Windows'un kendi "Özellikler" penceresini açar; `tab` verilirse o sekmede ("Security" gibi)
+pub fn show_properties(path: &Path, tab: Option<&str>) {
     let file = wide(path.as_os_str());
     let verb = wide(OsStr::new("properties"));
+    let params = tab.map(|t| wide(OsStr::new(t)));
     unsafe {
         let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
         info.fMask = 0x0000_000C; // SEE_MASK_INVOKEIDLIST
         info.lpVerb = verb.as_ptr();
         info.lpFile = file.as_ptr();
+        if let Some(p) = &params {
+            info.lpParameters = p.as_ptr();
+        }
         info.nShow = 5; // SW_SHOW
         ShellExecuteExW(&mut info);
     }
+}
+
+/// Dosya türünü açan varsayılan uygulama (görünen adı ve exe yolu)
+pub fn default_app(path: &Path) -> Option<crate::properties::AppInfo> {
+    const ASSOCSTR_EXECUTABLE: i32 = 2;
+    const ASSOCSTR_FRIENDLYAPPNAME: i32 = 4;
+    let ext = wide(OsStr::new(&format!(".{}", path.extension()?.to_string_lossy())));
+    let query = |what: i32| -> Option<String> {
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let hr = unsafe { AssocQueryStringW(0, what, ext.as_ptr(), std::ptr::null(), buf.as_mut_ptr(), &mut len) };
+        (hr == 0 && len > 1).then(|| String::from_utf16_lossy(&buf[..len as usize - 1]))
+    };
+    let name = query(ASSOCSTR_FRIENDLYAPPNAME)?;
+    Some(crate::properties::AppInfo { name, exe: query(ASSOCSTR_EXECUTABLE).map(PathBuf::from) })
+}
+
+/// Authenticode imzası; imzasızsa boş liste. PowerShell'den okunur (arka plan iş parçacığında çağrılır).
+pub fn signatures(path: &Path) -> Vec<crate::properties::Signer> {
+    const SCRIPT: &str = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
+        $s = Get-AuthenticodeSignature -LiteralPath $env:SE_PATH; $c = $s.SignerCertificate; \
+        [pscustomobject]@{ status=[string]$s.Status; message=$s.StatusMessage; \
+        signer=$(if($c){$c.GetNameInfo('SimpleName',$false)}else{''}); \
+        algo=$(if($c){$c.SignatureAlgorithm.FriendlyName}else{''}) } | ConvertTo-Json -Compress";
+    let Ok(out) = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("SE_PATH", path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return Vec::new() };
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if field("status") == "NotSigned" || field("signer").is_empty() {
+        return Vec::new();
+    }
+    // "sha256RSA" → "sha256": imza algoritmasından özet algoritması
+    let algo = field("algo");
+    let digest = algo.strip_suffix("RSA").or_else(|| algo.strip_suffix("ECDSA")).unwrap_or(&algo).to_string();
+    vec![crate::properties::Signer { name: field("signer"), digest, message: field("message") }]
+}
+
+/// Dosyanın bulunduğu birimin küme boyutu (diskte kapladığı yeri hesaplamak için)
+pub fn cluster_size(path: &Path) -> Option<u64> {
+    let root = wide(path.ancestors().last()?.as_os_str());
+    let (mut sectors, mut bytes, mut free, mut total) = (0u32, 0u32, 0u32, 0u32);
+    let ok = unsafe { GetDiskFreeSpaceW(root.as_ptr(), &mut sectors, &mut bytes, &mut free, &mut total) };
+    (ok != 0).then(|| sectors as u64 * bytes as u64)
+}
+
+/// Salt okunur / gizli özniteliklerini ayarlar; `None` olan değişmez
+pub fn set_attributes(path: &Path, readonly: Option<bool>, hidden: Option<bool>) -> std::io::Result<()> {
+    const READONLY: u32 = 0x1;
+    const HIDDEN: u32 = 0x2;
+    const NORMAL: u32 = 0x80;
+    let w = wide(path.as_os_str());
+    unsafe {
+        let cur = GetFileAttributesW(w.as_ptr());
+        if cur == u32::MAX {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut attrs = cur;
+        for (bit, v) in [(READONLY, readonly), (HIDDEN, hidden)] {
+            match v {
+                Some(true) => attrs |= bit,
+                Some(false) => attrs &= !bit,
+                None => {}
+            }
+        }
+        // FILE_ATTRIBUTE_NORMAL tek başına geçerlidir
+        if attrs & !NORMAL == 0 {
+            attrs = NORMAL;
+        } else {
+            attrs &= !NORMAL;
+        }
+        if SetFileAttributesW(w.as_ptr(), attrs) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 pub fn open_with(path: &Path) {
     let _ = Command::new("rundll32.exe")
         .raw_arg(format!("shell32.dll,OpenAs_RunDLL {}", path.display()))
         .spawn();
+}
+
+/// Windows'un "Birlikte aç" penceresini açar ve kapanana kadar bekler; "Her zaman" seçilirse
+/// dosya türünün varsayılan uygulaması değişir.
+pub fn choose_default_app(path: &Path) {
+    let _ = Command::new("rundll32.exe").raw_arg(format!("shell32.dll,OpenAs_RunDLL {}", path.display())).status();
 }
 
 pub fn show_in_explorer(path: &Path) {

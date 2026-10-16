@@ -1,3 +1,5 @@
 /target
 /dist
 packaging/flatpak/cargo-sources.json
+/output
+/.cache
