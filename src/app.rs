@@ -352,6 +352,9 @@ pub struct App {
     type_names: HashMap<String, String>,
     hwnd: Option<isize>,
     renaming: Option<Renaming>,
+    /// Click-to-rename: the item clicked again while it was the only selection, and when.
+    /// Renaming starts once the double-click time passes without another click.
+    slow_click: Option<(PathBuf, f64)>,
     undo: Vec<UndoOp>,
     /// Alt klasör listeleri (gezinti ağacı, adres çubuğu). Arka planda okunur; paylaşımlı
     /// tutulur ki her karede kopyalanmasın.
@@ -1138,6 +1141,7 @@ impl App {
             type_names: HashMap::new(),
             hwnd: None,
             renaming: None,
+            slow_click: None,
             undo: vec![],
             subdirs: HashMap::new(),
             subdirs_pending: Default::default(),
@@ -1711,6 +1715,7 @@ impl App {
                 }
             }
             Action::OpenEntry(p, is_dir) => {
+                self.slow_click = None;
                 if is_dir {
                     self.renaming = None;
                     self.images.drop_pending();
@@ -3326,9 +3331,34 @@ enum GLine {
 }
 
 /// Satır/kutu tıklama mantığı (Explorer ile aynı)
-fn handle_item_click(t: &mut Tab, resp: &egui::Response, row: usize, idx: usize, selected: bool, e: &Entry, actions: &mut Vec<Action>) {
+/// `TextEdit` layouter for renaming in the icon views: wraps the name and centers each line.
+/// egui 0.31's `TextEdit` assumes the galley starts at x = 0, but centered rows sit around
+/// x = 0, so the galley is shifted right by half its width.
+fn wrap_centered(ui: &egui::Ui, text: &str, wrap_width: f32) -> Arc<egui::Galley> {
+    let font = egui::FontSelection::default().resolve(ui.style());
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, ui.visuals().widgets.inactive.text_color(), wrap_width);
+    job.halign = Align::Center;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let dx = egui::vec2(-galley.rect.left(), 0.0);
+    let mut g = (*galley).clone();
+    for row in &mut g.rows {
+        row.rect = row.rect.translate(dx);
+        row.visuals.mesh.translate(dx);
+        row.visuals.mesh_bounds = row.visuals.mesh_bounds.translate(dx);
+        for glyph in &mut row.glyphs {
+            glyph.pos.x += dx.x;
+        }
+    }
+    g.rect = g.rect.translate(dx);
+    g.mesh_bounds = g.mesh_bounds.translate(dx);
+    Arc::new(g)
+}
+
+/// Returns true when the item was already the only selection and is clicked again
+/// (Explorer starts renaming on such a click if no double-click follows).
+fn handle_item_click(t: &mut Tab, resp: &egui::Response, row: usize, idx: usize, selected: bool, e: &Entry, actions: &mut Vec<Action>) -> bool {
     let (ctrl, shift) = resp.ctx.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
-    if resp.clicked() {
+    let again = resp.clicked() && !resp.double_clicked() && !ctrl && !shift && selected && t.selection.len() == 1;    if resp.clicked() {
         if ctrl {
             if !t.selection.remove(&idx) {
                 t.selection.insert(idx);
@@ -3359,6 +3389,7 @@ fn handle_item_click(t: &mut Tab, resp: &egui::Response, row: usize, idx: usize,
     if NATIVE_MENU && resp.secondary_clicked() && shift {
         actions.push(Action::ShellMenu { extended: true });
     }
+    again
 }
 
 impl App {
@@ -3447,7 +3478,7 @@ impl App {
     }
 
     fn details_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let App { tabs, active, images, renaming, type_names, show_ext, accent, clipboard, dir_sizes, sort, asc, item_rects, .. } = self;
+        let App { tabs, active, images, renaming, slow_click, type_names, show_ext, accent, clipboard, dir_sizes, sort, asc, item_rects, .. } = self;
         let (sort, asc, show_ext, accent) = (*sort, *asc, *show_ext, *accent);
         let t = &mut tabs[*active];
         let in_search = t.search.is_some();
@@ -3560,6 +3591,7 @@ impl App {
                         let rt = RichText::new(s);
                         if dim { rt.color(weak) } else { rt }
                     };
+                    let mut name_rect = Rect::NOTHING;
                     row.col(|ui| {
                         ui.add_space(4.0);
                         let resp = paint_icon(ui, images, &e.path, e.is_dir, &e.ext, e.plain_dir, 18.0, fsutil::icon(&e));
@@ -3586,7 +3618,7 @@ impl App {
                                 }
                             }
                             None => {
-                                ui.add(egui::Label::new(txt(display_name(&e, show_ext))).truncate());
+                                name_rect = ui.add(egui::Label::new(txt(display_name(&e, show_ext))).truncate()).rect;
                             }
                         }
                     });
@@ -3621,7 +3653,10 @@ impl App {
                     if t.cursor == Some(idx) && !selected && t.selection.is_empty() {
                         painter.rect_stroke(resp.rect.shrink(1.0), 4.0, Stroke::new(1.0_f32, focus_line), egui::StrokeKind::Inside);
                     }
-                    handle_item_click(t, &resp, r, idx, selected, &e, actions);
+                    if handle_item_click(t, &resp, r, idx, selected, &e, actions) && resp.interact_pointer_pos().is_some_and(|p| name_rect.contains(p)) {
+                        *slow_click = Some((e.path.clone(), resp.ctx.input(|i| i.time)));
+                        resp.ctx.request_repaint();
+                    }
                     if e.is_dir {
                         drop_target_p(&painter, &resp, &e.path, accent, actions);
                     }
@@ -3659,7 +3694,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let px = icon_px(&ctx, size);
 
-        let App { tabs, active, images, renaming, show_ext, accent, clipboard, item_rects, grid_scroll, type_names, .. } = self;
+        let App { tabs, active, images, renaming, slow_click, show_ext, accent, clipboard, item_rects, grid_scroll, type_names, .. } = self;
         let (show_ext, accent) = (*show_ext, *accent);
         let t = &mut tabs[*active];
         let in_search = t.search.is_some();
@@ -3771,10 +3806,21 @@ impl App {
                         }
                         // Ad (en fazla 2 satır, ortalı) ya da yeniden adlandırma kutusu
                         let name_rect = Rect::from_min_max(egui::pos2(rect.left() + 4.0, img_rect.bottom() + 6.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
+                        let mut text_rect = Rect::NOTHING;
                         match renaming.as_mut().filter(|rn| rn.path == e.path) {
                             Some(rn) => {
-                                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(name_rect.expand2(egui::vec2(18.0, 0.0))));
-                                let out = egui::TextEdit::singleline(&mut rn.text).id(egui::Id::new("inline_rename")).horizontal_align(Align::Center).desired_width(f32::INFINITY).show(&mut child);
+                                // Explorer: the box is as wide as the tile, the name wraps onto as many
+                                // lines as it needs and the box grows over the items below
+                                let clip = ui.clip_rect();
+                                let out = egui::Area::new(egui::Id::new("inline_rename_area"))
+                                    .order(egui::Order::Foreground)
+                                    .fixed_pos(egui::pos2(rect.left(), name_rect.top() - 2.0))
+                                    .constrain(false)
+                                    .show(&ctx, |ui| {
+                                        ui.set_clip_rect(clip);
+                                        egui::TextEdit::singleline(&mut rn.text).id(egui::Id::new("inline_rename")).horizontal_align(Align::Center).desired_width(tile_w - 8.0).layouter(&mut wrap_centered).show(ui)
+                                    })
+                                    .inner;
                                 if rn.first {
                                     out.response.request_focus();
                                     let stem = if e.is_dir { rn.text.chars().count() } else { rn.text.rfind('.').filter(|&d| d > 0).map(|d| rn.text[..d].chars().count()).unwrap_or(rn.text.chars().count()) };
@@ -3796,11 +3842,16 @@ impl App {
                                 job.wrap.break_anywhere = false;
                                 job.halign = Align::Center;
                                 let galley = painter.layout_job(job);
-                                painter.galley(egui::pos2(name_rect.center().x, name_rect.top()), galley, text_color);
+                                let pos = egui::pos2(name_rect.center().x, name_rect.top());
+                                text_rect = galley.rect.translate(pos.to_vec2());
+                                painter.galley(pos, galley, text_color);
                             }
                         }
 
-                        handle_item_click(t, &resp, r, idx, selected, &e, actions);
+                        if handle_item_click(t, &resp, r, idx, selected, &e, actions) && resp.interact_pointer_pos().is_some_and(|p| text_rect.contains(p)) {
+                            *slow_click = Some((e.path.clone(), ctx.input(|i| i.time)));
+                            ctx.request_repaint();
+                        }
                         if e.is_dir {
                             drop_target_p(&painter, &resp, &e.path, accent, actions);
                         }
@@ -4370,6 +4421,18 @@ impl eframe::App for App {
                 } else if !t.is_loading() && t.select_after_load.is_none() {
                     t.rename_after_load = None;
                 }
+            }
+        }
+        // Click-to-rename: start once the double-click time passes; a click or key press before then cancels it
+        if let Some((p, at)) = self.slow_click.clone() {
+            let (now, interrupted) = ctx.input(|i| (i.time, i.pointer.any_pressed() || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))));
+            let wait = ctx.options(|o| o.input_options.max_double_click_delay) - (now - at);            if interrupted || self.renaming.is_some() || self.tabs[self.active].selected_paths() != [p] {
+                self.slow_click = None;
+            } else if wait <= 0.0 {
+                self.slow_click = None;
+                self.apply(Action::Rename);
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64(wait));
             }
         }
         // Son klasörler
