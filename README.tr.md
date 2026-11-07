@@ -48,6 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/misutesu-desu/swift-explorer/main/i
 - Shift + sağ tık Windows'un tam sağ tık menüsünü açar; 7-Zip, WinRAR ve Gönder orada.
 - Sağ tık menüsü Windows menüsündeki uygulamaları da listeler: 7-Zip, WinRAR, Notepad++, Gönder gibi. En alttaki "Bu listeyi düzenle" hangilerinin görüneceğini seçer.
 - Ctrl+Z yeniden adlandırma, taşıma, kopyalama ve geri dönüşüm kutusuna silme işlemlerini geri alır.
+- Bu bilgisayar'a sağ tıklayınca Explorer'daki menü açılır: Yönet, Ağ sürücüsüne bağlan, Ağ sürücüsünün bağlantısını kes ve Özellikler.
+- Bir dosya başka bir programda açık olduğu için silinemez ya da taşınamazsa hangi program olduğu gösterilir. Program oradan kapatılabilir, kapanınca silme ya da taşıma kendiliğinden yeniden denenir.
 - Görünüm > Tema altında Sistem, Açık ve Koyu'nun yanında Catppuccin, Gruvbox, Everforest, Nord, Dracula, Tokyo Night, Rosé Pine ve Solarized var.
 - Kopyalama ve taşıma, dosyalar diske yazılmadan bitmiş sayılmaz. Terminalde `sync` çalıştırmak gibi. İlerleme çubuğu kaybolunca USB bellek çıkarılabilir. Başka sürücüye taşırken asıl dosyalar ancak bundan sonra silinir.
 - Windows'ta pencere kapatılınca uygulama arka planda bekler. Yeniden açınca pencere, grafik sürücüsünün açılmasını beklemeden hemen gelir. Görünüm > Oturum açılınca arka planda başlat seçilirse bilgisayar açıldıktan sonraki ilk açılış da hızlı olur.

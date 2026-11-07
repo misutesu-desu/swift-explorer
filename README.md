@@ -48,6 +48,8 @@ Releases after 0.2.0 also include `swift-explorer.flatpak`, which installs with 
 - Shift + right-click opens the full Windows context menu, so 7-Zip, WinRAR and Send to are there.
 - The right-click menu also lists the apps from the Windows menu, such as 7-Zip, WinRAR, Notepad++ and Send to. "Edit this list" at the bottom chooses which ones appear.
 - Ctrl+Z undoes renames, moves, copies and deletes to the Recycle Bin.
+- Right-clicking This PC opens the menu Explorer has there: Manage, Map network drive, Disconnect network drive and Properties.
+- When a file can't be deleted or moved because another program has it open, the app shows which program it is. It can be closed from there, and the delete or move runs again once the program exits.
 - Besides System, Light and Dark, View > Theme has Catppuccin, Gruvbox, Everforest, Nord, Dracula, Tokyo Night, Rosé Pine and Solarized.
 - A copy or move counts as done only after the files are written to the disk, like running `sync` in a terminal. Once the progress bar is gone, a USB stick can be pulled out. When moving to another drive, the originals are deleted only after that.
 - On Windows, closing the window keeps the app waiting in the background, so opening it again shows the window right away instead of waiting for the graphics driver to start. With View > Start in the background when signing in, the first launch after a reboot is quick too.
