@@ -11,6 +11,18 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+use windows_sys::Win32::Foundation::{BOOL, ERROR_MORE_DATA, FILETIME, HWND, LPARAM};
+use windows_sys::Win32::System::RestartManager::{
+    RmEndSession, RmGetList, RmRegisterResources, RmService, RmStartSession, CCH_RM_SESSION_KEY, RM_PROCESS_INFO,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
+};
+
+use crate::fsutil::Locker;
 
 const CREATE_NEW_CONSOLE: u32 = 0x10;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -515,6 +527,120 @@ pub fn set_default_file_manager(on: bool, _previous: Option<&str>) -> Option<Str
     }
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, std::ptr::null(), std::ptr::null()) };
     None
+}
+
+// ---------- Dosyayı kim kilitliyor: Restart Manager
+
+/// Klasörlerde içindeki dosyalara bakılır; çok büyük klasörde sorgu uzamasın diye sınır var
+const LOCK_SCAN_LIMIT: usize = 5000;
+
+fn files_under(paths: &[PathBuf], out: &mut Vec<PathBuf>) {
+    for p in paths {
+        if out.len() >= LOCK_SCAN_LIMIT {
+            return;
+        }
+        match std::fs::symlink_metadata(p) {
+            Ok(md) if md.is_dir() => {
+                let children: Vec<PathBuf> = std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).collect();
+                files_under(&children, out);
+            }
+            Ok(_) => out.push(p.clone()),
+            Err(_) => {}
+        }
+    }
+}
+
+fn filetime_u64(ft: FILETIME) -> u64 {
+    (ft.dwHighDateTime as u64) << 32 | ft.dwLowDateTime as u64
+}
+
+fn utf16_until_nul(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+}
+
+fn exe_path(pid: u32) -> Option<PathBuf> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+        CloseHandle(h);
+        ok.then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    }
+}
+
+/// Sürecin görünür, sahipsiz pencereleri: kapatılacak ana pencereler
+fn top_windows(pid: u32) -> Vec<HWND> {
+    struct Find {
+        pid: u32,
+        found: Vec<HWND>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let f = &mut *(lparam as *mut Find);
+        let mut owner_pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut owner_pid);
+        if owner_pid == f.pid && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
+            f.found.push(hwnd);
+        }
+        1
+    }
+    let mut f = Find { pid, found: Vec::new() };
+    unsafe { EnumWindows(Some(each), &mut f as *mut Find as LPARAM) };
+    f.found
+}
+
+/// Bu dosyaları açık tutan süreçler. Yavaş olabilir, arayüz iş parçacığında çağırma.
+pub fn lockers(paths: &[PathBuf]) -> Vec<Locker> {
+    let mut files = Vec::new();
+    files_under(paths, &mut files);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let wides: Vec<Vec<u16>> = files.iter().map(|p| wide(p.as_os_str())).collect();
+    let names: Vec<*const u16> = wides.iter().map(|w| w.as_ptr()).collect();
+    let mut found = Vec::new();
+    unsafe {
+        let mut session = 0u32;
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+        if RmStartSession(&mut session, 0, key.as_mut_ptr()) != 0 {
+            return found;
+        }
+        if RmRegisterResources(session, names.len() as u32, names.as_ptr(), 0, std::ptr::null(), 0, std::ptr::null()) == 0 {
+            let mut info: Vec<RM_PROCESS_INFO> = Vec::new();
+            // Sorgu arasında yeni süreç dosyayı açarsa liste büyür; birkaç kez denenir
+            for _ in 0..3 {
+                let (mut needed, mut count, mut reasons) = (0u32, info.capacity() as u32, 0u32);
+                let r = RmGetList(session, &mut needed, &mut count, info.as_mut_ptr(), &mut reasons);
+                if r == ERROR_MORE_DATA {
+                    info.reserve(needed as usize);
+                    continue;
+                }
+                if r == 0 {
+                    info.set_len(count as usize);
+                }
+                break;
+            }
+            let me = std::process::id();
+            for i in &info {
+                let pid = i.Process.dwProcessId;
+                found.push(Locker {
+                    pid,
+                    started: filetime_u64(i.Process.ProcessStartTime),
+                    name: utf16_until_nul(&i.strAppName),
+                    exe: exe_path(pid),
+                    service: i.ApplicationType == RmService,
+                    has_window: !top_windows(pid).is_empty(),
+                    is_self: pid == me,
+                });
+            }
+        }
+        RmEndSession(session);
+    }
+    found
 }
 
 #[cfg(test)]

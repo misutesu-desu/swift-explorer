@@ -594,7 +594,35 @@ pub struct Job {
     pub errors: Mutex<Vec<String>>,
     /// (kaynak, hedef) — geri alma için
     pub pairs: Mutex<Vec<(PathBuf, PathBuf)>>,
+    /// Başka bir program açık tuttuğu için yapılamayanlar ve o programlar
+    pub locked: Mutex<Vec<(PathBuf, Retry)>>,
+    pub lockers: Mutex<Vec<Locker>>,
 }
+
+/// Dosyayı açık tutan süreç
+#[derive(Clone)]
+pub struct Locker {
+    pub pid: u32,
+    /// Başlama zamanı: PID sonradan başka sürece geçtiyse yanlış program kapatılmasın
+    pub started: u64,
+    pub name: String,
+    pub exe: Option<PathBuf>,
+    pub service: bool,
+    pub has_window: bool,
+    pub is_self: bool,
+}
+
+/// Kilit kalkınca kilitli öğe için yeniden denenecek iş
+#[derive(Clone, PartialEq)]
+pub enum Retry {
+    Delete { permanent: bool },
+    Transfer { dest: PathBuf, cut: bool },
+    /// Taşımada kopya diske yazıldı, yalnızca kaynağın silinmesi kaldı
+    RemoveSource,
+}
+
+/// Kilit sorgusu her hatada klasör tarar; çok hatalı işte süreyi sınırlar
+const LOCK_CHECKS: usize = 20;
 
 /// Bitmemiş işler; süreç güncelleme için kendini kapatmadan önce bakar
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
@@ -621,6 +649,8 @@ impl Job {
             current: Mutex::new(String::new()),
             errors: Mutex::new(Vec::new()),
             pairs: Mutex::new(Vec::new()),
+            locked: Mutex::new(Vec::new()),
+            lockers: Mutex::new(Vec::new()),
         })
     }
     pub(crate) fn finish(&self) {
@@ -629,6 +659,25 @@ impl Job {
     }
     pub(crate) fn err(&self, e: String) {
         self.errors.lock().unwrap().push(e);
+    }
+    /// Hatayı kaydeder; öğeyi bir program açık tutuyorsa onu da
+    fn path_err(&self, path: &Path, retry: Retry, e: String, checks: &mut usize) {
+        self.err(e);
+        if *checks >= LOCK_CHECKS {
+            return;
+        }
+        *checks += 1;
+        let found = crate::win::lockers(&[path.to_path_buf()]);
+        if found.is_empty() {
+            return;
+        }
+        self.locked.lock().unwrap().push((path.to_path_buf(), retry));
+        let mut all = self.lockers.lock().unwrap();
+        for l in found {
+            if !all.iter().any(|a| a.pid == l.pid && a.started == l.started) {
+                all.push(l);
+            }
+        }
     }
     fn interrupted(&self) -> io::Result<()> {
         if self.cancel.load(Relaxed) {
@@ -813,11 +862,12 @@ pub fn spawn_transfer(srcs: Vec<PathBuf>, dest: PathBuf, cut: bool, conflict: Co
         j.total.store(total, Relaxed);
         let mut written = Vec::new();
         let mut copied = Vec::new();
+        let mut checks = 0;
         for (s, target) in remaining {
             match copy_tree(&s, &target, &j, &mut written) {
                 Ok(()) => copied.push((s, target)),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => break,
-                Err(e) => j.err(format!("{}: {e}", s.display())),
+                Err(e) => j.path_err(&s, Retry::Transfer { dest: dest.clone(), cut }, format!("{}: {e}", s.display()), &mut checks),
             }
         }
         j.syncing.store(true, Relaxed);
@@ -835,7 +885,7 @@ pub fn spawn_transfer(srcs: Vec<PathBuf>, dest: PathBuf, cut: bool, conflict: Co
                 }
                 let r = if s.is_dir() { fs::remove_dir_all(&s) } else { fs::remove_file(&s) };
                 if let Err(e) = r {
-                    j.err(format!("{}: {e}", s.display()));
+                    j.path_err(&s, Retry::RemoveSource, format!("{}: {e}", s.display()), &mut checks);
                 }
             }
             j.pairs.lock().unwrap().push((s, target));
@@ -890,6 +940,7 @@ pub fn spawn_delete(paths: Vec<PathBuf>, permanent: bool, ctx: egui::Context) ->
     let j = job.clone();
     thread::spawn(move || {
         j.total.store(paths.len() as u64, Relaxed);
+        let mut checks = 0;
         if permanent {
             for p in &paths {
                 if j.cancel.load(Relaxed) {
@@ -898,12 +949,23 @@ pub fn spawn_delete(paths: Vec<PathBuf>, permanent: bool, ctx: egui::Context) ->
                 *j.current.lock().unwrap() = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let r = if p.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) };
                 if let Err(e) = r {
-                    j.err(format!("{}: {e}", p.display()));
+                    j.path_err(p, Retry::Delete { permanent: true }, format!("{}: {e}", p.display()), &mut checks);
                 }
                 j.done.fetch_add(1, Relaxed);
             }
         } else if let Err(e) = trash::delete_all(&paths) {
             j.err(e.to_string());
+            // Hata toplu gelir; hangi öğenin kilitli olduğuna tek tek bakılır
+            let mut found = Vec::new();
+            for p in paths.iter().take(LOCK_CHECKS) {
+                if !crate::win::lockers(std::slice::from_ref(p)).is_empty() {
+                    found.push(p.clone());
+                }
+            }
+            if !found.is_empty() {
+                *j.lockers.lock().unwrap() = crate::win::lockers(&found);
+                j.locked.lock().unwrap().extend(found.into_iter().map(|p| (p, Retry::Delete { permanent: false })));
+            }
         } else {
             j.done.store(paths.len() as u64, Relaxed);
             j.pairs.lock().unwrap().extend(paths.iter().map(|p| (p.clone(), p.clone())));
@@ -1153,6 +1215,30 @@ mod tests {
         let old = t.elapsed();
         assert_eq!(v, v2);
         println!("15000 ad sıralama: yeni {new:?}, eski {old:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_of_open_file_names_the_program_holding_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("swift-explorer-lock-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("açık.txt");
+        fs::write(&file, b"veri").unwrap();
+        // Paylaşımsız açılan dosya silinemez, Explorer'daki "dosya kullanımda" durumu
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+
+        let job = spawn_delete(vec![file.clone()], true, egui::Context::default());
+        while !job.finished.load(Relaxed) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(job.errors.lock().unwrap().len(), 1);
+        assert!(*job.locked.lock().unwrap() == vec![(file.clone(), Retry::Delete { permanent: true })]);
+        assert!(job.lockers.lock().unwrap().iter().any(|l| l.is_self && l.pid == std::process::id()));
+
+        drop(held);
+        assert!(crate::win::lockers(std::slice::from_ref(&file)).is_empty());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

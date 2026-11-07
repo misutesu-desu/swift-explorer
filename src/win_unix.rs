@@ -326,3 +326,8 @@ pub fn set_default_file_manager(on: bool, previous: Option<&str>) -> Option<Stri
 
 /// Linux'ta kayıt `.desktop` kimliğiyle yapılır, exe yolu değişse de geçerli kalır
 pub fn refresh_default_file_manager() {}
+
+/// Linux açık dosyanın silinmesini engellemez, kilitleyen aranmaz
+pub fn lockers(_paths: &[PathBuf]) -> Vec<crate::fsutil::Locker> {
+    Vec::new()
+}
