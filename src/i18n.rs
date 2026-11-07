@@ -535,6 +535,12 @@ static TABLE: &[(&str, &str)] = &[
     ("Sağ tık menüsündeki uygulamalar", "Apps in the right-click menu"),
     ("İşaretli olanlar menüde görünür. Windows'un tam menüsü Shift + sağ tıkta her zaman açılır.", "Checked items appear in the menu. The full Windows menu always opens with Shift + right-click."),
     ("Paylaş", "Share"),
+    ("Daralt", "Collapse"),
+    ("Genişlet", "Expand"),
+    ("Yönet", "Manage"),
+    ("Ağ sürücüsüne bağlan…", "Map network drive…"),
+    ("Ağ sürücüsünün bağlantısını kes…", "Disconnect network drive…"),
+    ("Daha fazla seçenek göster", "Show more options"),
 ];
 
 #[cfg(test)]

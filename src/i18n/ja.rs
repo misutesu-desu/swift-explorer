@@ -376,4 +376,10 @@ pub static TABLE: &[(&str, &str)] = &[
     ("Sağ tık menüsündeki uygulamalar", "右クリック メニューのアプリ"),
     ("İşaretli olanlar menüde görünür. Windows'un tam menüsü Shift + sağ tıkta her zaman açılır.", "チェックした項目がメニューに表示されます。Shift + 右クリックでは常に Windows の完全なメニューが開きます。"),
     ("Paylaş", "共有"),
+    ("Daralt", "折りたたむ"),
+    ("Genişlet", "展開"),
+    ("Yönet", "管理"),
+    ("Ağ sürücüsüne bağlan…", "ネットワーク ドライブの割り当て…"),
+    ("Ağ sürücüsünün bağlantısını kes…", "ネットワーク ドライブの切断…"),
+    ("Daha fazla seçenek göster", "その他のオプションを確認"),
 ];

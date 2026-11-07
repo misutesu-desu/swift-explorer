@@ -303,6 +303,9 @@ enum Action {
     ShowInExplorer(PathBuf),
     OpenWith(PathBuf),
     ShellMenu { extended: bool },
+    /// Seçimden bağımsız bir yolun Windows menüsü; kenar çubuğundaki "Bu bilgisayar" gibi
+    NativeMenu { path: PathBuf, extended: bool },
+    System(SysTool),
     CalcSize,
     AddBookmark(PathBuf),
     RemoveBookmark(PathBuf),
@@ -319,6 +322,14 @@ enum Action {
     /// Seçili öğeleri öbür bölmenin klasörüne kopyala ya da taşı
     ToOtherPane { cut: bool },
     Undo,
+}
+
+/// Explorer'ın "Bu bilgisayar" menüsündeki Windows araçları
+enum SysTool {
+    Manage,
+    MapDrive,
+    DisconnectDrive,
+    About,
 }
 
 enum Dialog {
@@ -2122,6 +2133,22 @@ impl App {
                     self.inject_release = ctx.input(|i| i.pointer.latest_pos());
                 }
             }
+            Action::NativeMenu { path, extended } => {
+                if let Some(hwnd) = self.hwnd {
+                    shell::context_menu(hwnd, &[path], extended);
+                    self.inject_release = ctx.input(|i| i.pointer.latest_pos());
+                }
+            }
+            #[cfg(windows)]
+            Action::System(tool) => match tool {
+                SysTool::Manage => win::shell_open("compmgmt.msc"),
+                SysTool::MapDrive => win::network_drive_dialog(false),
+                SysTool::DisconnectDrive => win::network_drive_dialog(true),
+                // Windows 11'de Bu bilgisayar > Özellikler de Ayarlar'daki Hakkında sayfasını açıyor
+                SysTool::About => win::shell_open("ms-settings:about"),
+            },
+            #[cfg(not(windows))]
+            Action::System(_) => {}
             Action::CalcSize => {
                 let mut dirs: Vec<PathBuf> = self.tab().selected_entries().iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
                 if dirs.is_empty() {
@@ -3151,6 +3178,22 @@ impl App {
             if r.clicked() {
                 actions.push(Action::Navigate(pc.clone()));
             }
+            if r.middle_clicked() {
+                actions.push(Action::NewTab(pc.clone()));
+            }
+            if NATIVE_MENU && r.secondary_clicked() && ui.input(|i| i.modifiers.shift) {
+                actions.push(Action::NativeMenu { path: pc.clone(), extended: true });
+            } else {
+                let mut toggle = false;
+                r.context_menu(|ui| toggle = pc_menu(ui, Some(open), actions));
+                if toggle {
+                    if open {
+                        self.tree_open.remove(&pc);
+                    } else {
+                        self.tree_open.insert(pc.clone());
+                    }
+                }
+            }
             if open {
                 let drives = self.drives.lock().unwrap().clone();
                 for d in drives {
@@ -3263,6 +3306,15 @@ impl App {
     fn pc_page(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let accent = self.accent;
         let p = pal_of(ui);
+        // Sürücülerin arasındaki boşluğa sağ tık; sürücü kutuları bunun üstünde kendi menüsünü açar
+        let bg = ui.interact(ui.max_rect(), ui.id().with("pc_bg"), Sense::click());
+        if NATIVE_MENU && bg.secondary_clicked() && ui.input(|i| i.modifiers.shift) {
+            actions.push(Action::NativeMenu { path: PathBuf::from(THIS_PC), extended: true });
+        } else {
+            bg.context_menu(|ui| {
+                pc_menu(ui, None, actions);
+            });
+        }
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add_space(6.0);
@@ -3552,6 +3604,37 @@ fn item_menu(ui: &mut egui::Ui, path: &Path, is_dir: bool, in_search: bool, shel
             ui.close_menu();
         }
     }
+}
+
+/// "Bu bilgisayar" menüsü. `tree` kenar çubuğundaki satırın açık olup olmadığı,
+/// sayfanın boş alanında None. Genişlet/Daralt seçilirse true döner.
+fn pc_menu(ui: &mut egui::Ui, tree: Option<bool>, actions: &mut Vec<Action>) -> bool {
+    menu_style(ui);
+    let pc = PathBuf::from(THIS_PC);
+    let mut toggle = false;
+    match tree {
+        Some(open) => {
+            let (glyph, key) = if open { (g::CHEVRON_DOWN, "Daralt") } else { (g::CHEVRON_RIGHT, "Genişlet") };
+            if menu_item(ui, glyph, key) {
+                toggle = true;
+                ui.close_menu();
+            }
+            menu_action(ui, actions, g::OPEN, "Aç", Action::Navigate(pc.clone()));
+            menu_action(ui, actions, g::NEW_TAB, "Yeni sekmede aç", Action::NewTab(pc.clone()));
+        }
+        None => menu_action(ui, actions, g::REFRESH, "Yenile (F5)", Action::Refresh),
+    }
+    if NATIVE_MENU {
+        ui.separator();
+        menu_action(ui, actions, g::SETTINGS, "Yönet", Action::System(SysTool::Manage));
+        menu_action(ui, actions, g::LINK, "Ağ sürücüsüne bağlan…", Action::System(SysTool::MapDrive));
+        menu_action(ui, actions, g::CANCEL, "Ağ sürücüsünün bağlantısını kes…", Action::System(SysTool::DisconnectDrive));
+        ui.separator();
+        menu_action(ui, actions, g::INFO, "Özellikler", Action::System(SysTool::About));
+        ui.separator();
+        menu_action(ui, actions, g::MORE, "Daha fazla seçenek göster", Action::NativeMenu { path: pc, extended: false });
+    }
+    toggle
 }
 
 fn background_menu(ui: &mut egui::Ui, current: &Path, in_search: bool, can_undo: bool, view_level: usize, actions: &mut Vec<Action>) {

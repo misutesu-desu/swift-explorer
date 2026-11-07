@@ -104,6 +104,27 @@ pub fn show_properties(path: &Path) {
     }
 }
 
+/// Kabuğa açtırır: .msc gibi yönetici izni isteyen hedeflerde UAC penceresi de böyle çıkar.
+/// UAC onayı beklerken arayüz donmasın diye ayrı iş parçacığında.
+pub fn shell_open(target: &str) {
+    let file = wide(OsStr::new(target));
+    std::thread::spawn(move || unsafe {
+        let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.lpFile = file.as_ptr();
+        info.nShow = 5; // SW_SHOW
+        ShellExecuteExW(&mut info);
+    });
+}
+
+/// Explorer'ın "Ağ sürücüsüne bağlan" ya da "Bağlantıyı kes" penceresi
+pub fn network_drive_dialog(disconnect: bool) {
+    let which = if disconnect { "Disconnect" } else { "Connect" };
+    let _ = Command::new("rundll32.exe")
+        .raw_arg(format!("shell32.dll,SHHelpShortcuts_RunDLL {which}"))
+        .spawn();
+}
+
 pub fn open_with(path: &Path) {
     let _ = Command::new("rundll32.exe")
         .raw_arg(format!("shell32.dll,OpenAs_RunDLL {}", path.display()))

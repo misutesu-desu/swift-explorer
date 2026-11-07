@@ -376,4 +376,10 @@ pub static TABLE: &[(&str, &str)] = &[
     ("Sağ tık menüsündeki uygulamalar", "Aplicativos no menu de contexto"),
     ("İşaretli olanlar menüde görünür. Windows'un tam menüsü Shift + sağ tıkta her zaman açılır.", "Os itens marcados aparecem no menu. O menu completo do Windows sempre abre com Shift + clique direito."),
     ("Paylaş", "Compartilhar"),
+    ("Daralt", "Recolher"),
+    ("Genişlet", "Expandir"),
+    ("Yönet", "Gerenciar"),
+    ("Ağ sürücüsüne bağlan…", "Mapear unidade de rede…"),
+    ("Ağ sürücüsünün bağlantısını kes…", "Desconectar unidade de rede…"),
+    ("Daha fazla seçenek göster", "Mostrar mais opções"),
 ];
