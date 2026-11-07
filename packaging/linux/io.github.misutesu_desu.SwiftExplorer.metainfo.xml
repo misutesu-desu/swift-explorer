@@ -41,6 +41,15 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.9.0" date="2026-11-07">
+      <description>
+        <p>A right-click menu for This PC, and the program holding a file is shown when a delete or move fails.</p>
+        <ul>
+          <li>Right-clicking This PC in the navigation pane or on its page opens a menu with Open, Open in new tab and Expand.</li>
+          <li>On Windows, when another program has a file open, a window names that program, can close it and runs the delete or move again once it exits.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-10-29">
       <description>
         <p>A command palette, split view, batch rename and zip archives.</p>
