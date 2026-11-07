@@ -541,6 +541,15 @@ static TABLE: &[(&str, &str)] = &[
     ("Ağ sürücüsüne bağlan…", "Map network drive…"),
     ("Ağ sürücüsünün bağlantısını kes…", "Disconnect network drive…"),
     ("Daha fazla seçenek göster", "Show more options"),
+    ("Dosya başka bir programda açık", "The file is open in another program"),
+    ("{} şu programlarda açık olduğu için işlem tamamlanamadı. Program kapanınca işlem kendiliğinden yeniden denenir.", "{} couldn't be finished because it is open in these programs. Once the program closes, it is tried again automatically."),
+    ("Bu uygulama", "This app"),
+    ("Windows hizmeti", "Windows service"),
+    ("Sonlandır", "End task"),
+    ("Program hemen kapanır, kaydedilmemiş değişiklikler kaybolur", "The program closes right away and unsaved changes are lost"),
+    ("Program kaydedilmemiş iş için soru sorabilir", "The program may ask about unsaved work"),
+    ("{} kapatılamadı, yönetici olarak çalışıyor olabilir", "Couldn't close {}. It may be running as administrator"),
+    ("Tekrar dene", "Try again"),
 ];
 
 #[cfg(test)]

@@ -16,10 +16,10 @@ use windows_sys::Win32::System::RestartManager::{
     RmEndSession, RmGetList, RmRegisterResources, RmService, RmStartSession, CCH_RM_SESSION_KEY, RM_PROCESS_INFO,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
+    EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, GW_OWNER, WM_CLOSE,
 };
 
 use crate::fsutil::Locker;
@@ -559,6 +559,24 @@ fn utf16_until_nul(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..len])
 }
 
+/// Aynı PID'yi sonradan başka bir süreç almış olabilir; başlama zamanı tutmazsa tutamaç verilmez
+fn open_same(l: &Locker, access: u32) -> Option<HANDLE> {
+    unsafe {
+        let h = OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION, 0, l.pid);
+        if h.is_null() {
+            return None;
+        }
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+        if GetProcessTimes(h, &mut created, &mut exit, &mut kernel, &mut user) != 0 && filetime_u64(created) == l.started {
+            Some(h)
+        } else {
+            CloseHandle(h);
+            None
+        }
+    }
+}
+
 fn exe_path(pid: u32) -> Option<PathBuf> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -641,6 +659,27 @@ pub fn lockers(paths: &[PathBuf]) -> Vec<Locker> {
         RmEndSession(session);
     }
     found
+}
+
+/// Pencerelerine kapat mesajı gönderir; program kaydedilmemiş iş için soru sorabilir
+pub fn close_locker(l: &Locker) -> bool {
+    let Some(h) = open_same(l, 0) else { return false };
+    unsafe { CloseHandle(h) };
+    let windows = top_windows(l.pid);
+    for &w in &windows {
+        unsafe { PostMessageW(w, WM_CLOSE, 0, 0) };
+    }
+    !windows.is_empty()
+}
+
+/// Süreci hemen sonlandırır; kaydedilmemiş değişiklikler kaybolur
+pub fn kill_locker(l: &Locker) -> bool {
+    let Some(h) = open_same(l, PROCESS_TERMINATE) else { return false };
+    unsafe {
+        let ok = TerminateProcess(h, 1) != 0;
+        CloseHandle(h);
+        ok
+    }
 }
 
 #[cfg(test)]

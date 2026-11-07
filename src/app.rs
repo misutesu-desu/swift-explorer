@@ -11,7 +11,7 @@ use egui::{Align, Align2, Color32, CornerRadius, DragAndDrop, Key, Layout, Modif
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::fsutil::{self, Conflict, Entry, Job, JobKind, PreviewData, SortKey};
+use crate::fsutil::{self, Conflict, Entry, Job, JobKind, Locker, PreviewData, Retry, SortKey};
 use crate::scheme;
 use crate::shell::{self, ImageCache, Img, MenuResult};
 use crate::tab::{normalize, Tab, THIS_PC};
@@ -343,6 +343,17 @@ enum Dialog {
     BatchRename { items: Vec<crate::rename::Item>, rule: crate::rename::Rule },
     #[cfg(not(windows))]
     Properties(Box<crate::properties::Properties>),
+    Locked(Box<LockedDialog>),
+}
+
+/// Bir program açık tuttuğu için silinemeyen ya da taşınamayan öğeler
+struct LockedDialog {
+    items: Vec<(PathBuf, Retry)>,
+    lockers: Vec<Locker>,
+    /// Liste her saniye arka planda yenilenir; program kapanınca iş kendiliğinden yeniden denenir
+    fresh: Arc<Mutex<Option<Vec<Locker>>>>,
+    busy: Arc<AtomicBool>,
+    checked: Instant,
 }
 
 /// Komut paletindeki bir satırın yaptığı iş
@@ -1502,6 +1513,25 @@ impl App {
             self.push_job(fsutil::spawn_transfer(files, dest, cut, Conflict::KeepBoth, ctx), true);
         } else {
             self.dialog = Dialog::Conflict { files, dest, cut, names };
+        }
+    }
+
+    /// Kilidi kalkan öğeleri ilk hangi iş için seçildilerse onunla yeniden dener
+    fn retry_locked(&mut self, items: Vec<(PathBuf, Retry)>) {
+        let mut kinds: Vec<Retry> = Vec::new();
+        for (_, r) in &items {
+            if !kinds.contains(r) {
+                kinds.push(r.clone());
+            }
+        }
+        for kind in kinds {
+            let paths: Vec<PathBuf> = items.iter().filter(|(_, r)| *r == kind).map(|(p, _)| p.clone()).collect();
+            let ctx = self.ctx.clone();
+            match kind {
+                Retry::Delete { permanent } => self.push_job(fsutil::spawn_delete(paths, permanent, ctx), false),
+                Retry::RemoveSource => self.push_job(fsutil::spawn_delete(paths, true, ctx), false),
+                Retry::Transfer { dest, cut } => self.start_transfer(paths, dest, cut),
+            }
         }
     }
 
@@ -4986,6 +5016,77 @@ impl App {
                     self.toast(e, true);
                 }
             }
+            Dialog::Locked(d) => {
+                if d.checked.elapsed() > Duration::from_secs(1) && !d.busy.swap(true, Relaxed) {
+                    d.checked = Instant::now();
+                    let paths: Vec<PathBuf> = d.items.iter().map(|(p, _)| p.clone()).collect();
+                    let (fresh, busy, ctx) = (d.fresh.clone(), d.busy.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        *fresh.lock().unwrap() = Some(win::lockers(&paths));
+                        busy.store(false, Relaxed);
+                        ctx.request_repaint();
+                    });
+                }
+                ctx.request_repaint_after(Duration::from_secs(1));
+                let mut retry = false;
+                if let Some(l) = d.fresh.lock().unwrap().take() {
+                    retry = l.is_empty();
+                    d.lockers = l;
+                }
+                let resp = egui::Modal::new(egui::Id::new("locked")).show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    ui.heading(crate::i18n::t("Dosya başka bir programda açık"));
+                    ui.add_space(4.0);
+                    let what = if d.items.len() == 1 { format!("\"{}\"", path_label(&d.items[0].0)) } else { crate::i18n::tf("{} öğe", &[&d.items.len()]) };
+                    ui.label(crate::i18n::tf("{} şu programlarda açık olduğu için işlem tamamlanamadı. Program kapanınca işlem kendiliğinden yeniden denenir.", &[&what]));
+                    ui.add_space(8.0);
+                    for l in &d.lockers {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                            let icon = l.exe.clone().unwrap_or_else(|| PathBuf::from(&l.name));
+                            draw_icon(ui.painter(), &mut self.images, &icon, false, "exe", rect);
+                            ui.label(&l.name);
+                            ui.label(RichText::new(format!("PID {}", l.pid)).weak());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if l.is_self {
+                                    ui.label(RichText::new(crate::i18n::t("Bu uygulama")).weak());
+                                } else if l.service {
+                                    ui.label(RichText::new(crate::i18n::t("Windows hizmeti")).weak());
+                                } else {
+                                    let kill = ui.button(crate::i18n::t("Sonlandır")).on_hover_text(crate::i18n::t("Program hemen kapanır, kaydedilmemiş değişiklikler kaybolur"));
+                                    if kill.clicked() && !win::kill_locker(l) {
+                                        self.toast(crate::i18n::tf("{} kapatılamadı, yönetici olarak çalışıyor olabilir", &[&l.name]), true);
+                                    }
+                                    if l.has_window {
+                                        let close = ui.button(crate::i18n::t("Kapat")).on_hover_text(crate::i18n::t("Program kaydedilmemiş iş için soru sorabilir"));
+                                        if close.clicked() && !win::close_locker(l) {
+                                            self.toast(crate::i18n::tf("{} kapatılamadı, yönetici olarak çalışıyor olabilir", &[&l.name]), true);
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    ui.add_space(10.0);
+                    let mut cancel = false;
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(crate::i18n::t("Vazgeç")).min_size(egui::vec2(90.0, 30.0))).clicked() {
+                            cancel = true;
+                        }
+                        if ui.add(egui::Button::new(crate::i18n::t("Tekrar dene")).min_size(egui::vec2(110.0, 30.0))).clicked() {
+                            retry = true;
+                        }
+                    });
+                    cancel
+                });
+                if retry {
+                    let items = std::mem::take(&mut d.items);
+                    self.retry_locked(items);
+                    keep = false;
+                } else if resp.inner || resp.should_close() {
+                    keep = false;
+                }
+            }
             Dialog::Palette { query, sel } => keep = self.palette(ctx, query, sel, actions),
             Dialog::ShellItems(items) => {
                 let resp = egui::Modal::new(egui::Id::new("shell_items")).show(ctx, |ui| {
@@ -5235,7 +5336,17 @@ impl eframe::App for App {
                 }
             }
             let errs = j.errors.lock().unwrap().clone();
-            if let Some(first) = errs.first() {
+            let locked = std::mem::take(&mut *j.locked.lock().unwrap());
+            if !locked.is_empty() && matches!(self.dialog, Dialog::None) {
+                let lockers = j.lockers.lock().unwrap().clone();
+                self.dialog = Dialog::Locked(Box::new(LockedDialog {
+                    items: locked,
+                    lockers,
+                    fresh: Arc::new(Mutex::new(None)),
+                    busy: Arc::new(AtomicBool::new(false)),
+                    checked: Instant::now(),
+                }));
+            } else if let Some(first) = errs.first() {
                 let more = if errs.len() > 1 { crate::i18n::tf(" (+{} hata)", &[&(errs.len() - 1)]) } else { String::new() };
                 self.toast(format!("{first}{more}"), true);
             } else if j.cancel.load(Relaxed) {

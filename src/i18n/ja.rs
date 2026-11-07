@@ -382,4 +382,13 @@ pub static TABLE: &[(&str, &str)] = &[
     ("Ağ sürücüsüne bağlan…", "ネットワーク ドライブの割り当て…"),
     ("Ağ sürücüsünün bağlantısını kes…", "ネットワーク ドライブの切断…"),
     ("Daha fazla seçenek göster", "その他のオプションを確認"),
+    ("Dosya başka bir programda açık", "ファイルは別のプログラムで開かれています"),
+    ("{} şu programlarda açık olduğu için işlem tamamlanamadı. Program kapanınca işlem kendiliğinden yeniden denenir.", "{} は次のプログラムで開かれているため、操作を完了できませんでした。プログラムが終了すると自動的に再試行します。"),
+    ("Bu uygulama", "このアプリ"),
+    ("Windows hizmeti", "Windows サービス"),
+    ("Sonlandır", "タスクの終了"),
+    ("Program hemen kapanır, kaydedilmemiş değişiklikler kaybolur", "プログラムはすぐに終了し、保存されていない変更は失われます"),
+    ("Program kaydedilmemiş iş için soru sorabilir", "保存されていない作業について確認される場合があります"),
+    ("{} kapatılamadı, yönetici olarak çalışıyor olabilir", "{} を閉じられませんでした。管理者として実行されている可能性があります"),
+    ("Tekrar dene", "再試行"),
 ];

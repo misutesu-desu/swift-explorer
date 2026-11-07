@@ -382,4 +382,13 @@ pub static TABLE: &[(&str, &str)] = &[
     ("Ağ sürücüsüne bağlan…", "映射网络驱动器…"),
     ("Ağ sürücüsünün bağlantısını kes…", "断开网络驱动器…"),
     ("Daha fazla seçenek göster", "显示更多选项"),
+    ("Dosya başka bir programda açık", "文件已在另一个程序中打开"),
+    ("{} şu programlarda açık olduğu için işlem tamamlanamadı. Program kapanınca işlem kendiliğinden yeniden denenir.", "{} 已在以下程序中打开，因此操作无法完成。程序关闭后会自动重试。"),
+    ("Bu uygulama", "此应用"),
+    ("Windows hizmeti", "Windows 服务"),
+    ("Sonlandır", "结束任务"),
+    ("Program hemen kapanır, kaydedilmemiş değişiklikler kaybolur", "程序会立即关闭，未保存的更改将丢失"),
+    ("Program kaydedilmemiş iş için soru sorabilir", "程序可能会询问未保存的工作"),
+    ("{} kapatılamadı, yönetici olarak çalışıyor olabilir", "无法关闭 {}。它可能正在以管理员身份运行"),
+    ("Tekrar dene", "重试"),
 ];

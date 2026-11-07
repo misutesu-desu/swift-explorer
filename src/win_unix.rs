@@ -331,3 +331,11 @@ pub fn refresh_default_file_manager() {}
 pub fn lockers(_paths: &[PathBuf]) -> Vec<crate::fsutil::Locker> {
     Vec::new()
 }
+
+pub fn close_locker(_l: &crate::fsutil::Locker) -> bool {
+    false
+}
+
+pub fn kill_locker(_l: &crate::fsutil::Locker) -> bool {
+    false
+}

@@ -382,4 +382,13 @@ pub static TABLE: &[(&str, &str)] = &[
     ("Ağ sürücüsüne bağlan…", "Mapear unidade de rede…"),
     ("Ağ sürücüsünün bağlantısını kes…", "Desconectar unidade de rede…"),
     ("Daha fazla seçenek göster", "Mostrar mais opções"),
+    ("Dosya başka bir programda açık", "O arquivo está aberto em outro programa"),
+    ("{} şu programlarda açık olduğu için işlem tamamlanamadı. Program kapanınca işlem kendiliğinden yeniden denenir.", "Não foi possível concluir a operação com {} porque está aberto nestes programas. Quando o programa fechar, ela será tentada de novo automaticamente."),
+    ("Bu uygulama", "Este aplicativo"),
+    ("Windows hizmeti", "Serviço do Windows"),
+    ("Sonlandır", "Finalizar tarefa"),
+    ("Program hemen kapanır, kaydedilmemiş değişiklikler kaybolur", "O programa fecha na hora e as alterações não salvas são perdidas"),
+    ("Program kaydedilmemiş iş için soru sorabilir", "O programa pode perguntar sobre trabalho não salvo"),
+    ("{} kapatılamadı, yönetici olarak çalışıyor olabilir", "Não foi possível fechar {}. Ele pode estar sendo executado como administrador"),
+    ("Tekrar dene", "Tentar novamente"),
 ];
