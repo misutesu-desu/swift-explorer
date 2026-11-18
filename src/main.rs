@@ -4,6 +4,7 @@ mod app;
 mod archive;
 #[cfg(not(windows))]
 mod desktop_apps;
+mod folder_lock;
 mod fsutil;
 mod i18n;
 mod images;

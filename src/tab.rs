@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 
+use crate::folder_lock::FolderLock;
 use crate::fsutil::{self, Entry, LoadMsg, Pattern, SearchHandle, SearchMsg, SortKey};
 
 /// Explorer'daki "Bu bilgisayar" sanal konumu (Shell ayrıştırma adı; ikonu da bununla alınır)
@@ -57,6 +58,8 @@ pub struct Tab {
     pub filter: String,
     /// Kayıtlı ama henüz okunmamış sekme
     lazy: bool,
+    load_requested: bool,
+    pub folder_access: Vec<FolderLock>,
     loader: Option<Receiver<LoadMsg>>,
     progressive: bool,
     load_started: Instant,
@@ -145,6 +148,8 @@ impl Tab {
             collapsed_groups: HashSet::new(),
             cursor_path: None,
             lazy: false,
+            load_requested: false,
+            folder_access: vec![],
         }
     }
 
@@ -158,6 +163,22 @@ impl Tab {
             let p = std::mem::take(&mut self.path);
             self.navigate(p, false, ctx);
         }
+    }
+
+    pub fn is_lazy(&self) -> bool {
+        self.lazy
+    }
+
+    pub fn request_load(&mut self) -> bool {
+        self.lazy && !std::mem::replace(&mut self.load_requested, true)
+    }
+
+    pub fn relock(&mut self) {
+        self.cancel_search();
+        let mut tab = Self::new_lazy(std::mem::take(&mut self.path));
+        tab.back = std::mem::take(&mut self.back);
+        tab.forward = std::mem::take(&mut self.forward);
+        *self = tab;
     }
 
     pub fn title(&self) -> String {
@@ -201,6 +222,9 @@ impl Tab {
             self.forward.clear();
         }
         self.cancel_search();
+        self.lazy = false;
+        self.load_requested = false;
+        self.folder_access.clear();
         self.path = path;
         self.filter.clear();
         self.entries.clear();
@@ -247,22 +271,29 @@ impl Tab {
             self.exit_search(ctx);
             return;
         }
-        if self.is_home() {
-            if self.is_pc() {
-                self.navigate(PathBuf::new(), true, ctx);
+        if let Some(parent) = self.up_target() {
+            if !self.is_home() {
+                self.select_after_load = Some(self.path.clone());
             }
-            return;
+            self.navigate(parent, true, ctx);
+        }
+    }
+
+    pub fn up_target(&self) -> Option<PathBuf> {
+        if self.search.is_some() || self.path.as_os_str().is_empty() {
+            return None;
+        }
+        if self.is_pc() {
+            return Some(PathBuf::new());
         }
         // Sürücü kökünün üstü Explorer'daki gibi "Bu bilgisayar"
-        let parent = self.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(THIS_PC));
-        self.select_after_load = Some(self.path.clone());
-        self.navigate(parent, true, ctx);
+        Some(self.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(THIS_PC)))
     }
 
     /// `progressive`: girdileri geldikçe göster (ilk açılış). Aksi halde eski liste
     /// yeni liste hazır olana kadar ekranda kalır — yenilemede titreme olmaz.
     pub fn load(&mut self, progressive: bool, ctx: &egui::Context) {
-        if self.is_home() {
+        if self.is_home() || self.lazy {
             return;
         }
         self.progressive = progressive;
@@ -302,7 +333,7 @@ impl Tab {
     /// `roots`: aranacak klasörler. Bu bilgisayar'da bunlar sürücü kökleridir.
     pub fn start_search(&mut self, roots: Vec<PathBuf>, ctx: &egui::Context) {
         let pattern = Pattern::new(&self.filter);
-        if pattern.is_empty() {
+        if pattern.is_empty() || self.lazy {
             return;
         }
         self.cancel_search();
@@ -314,7 +345,7 @@ impl Tab {
         self.view_dirty = true;
         self.search = Some(Search {
             query: self.filter.trim().to_string(),
-            handle: fsutil::spawn_search(roots, pattern, ctx.clone()),
+            handle: fsutil::spawn_search(roots, pattern, !self.is_home(), ctx.clone()),
             done: false,
             started: Instant::now(),
             elapsed: Duration::ZERO,

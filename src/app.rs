@@ -11,6 +11,7 @@ use egui::{Align, Align2, Color32, CornerRadius, DragAndDrop, Key, Layout, Modif
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::folder_lock::{self, FolderLock};
 use crate::fsutil::{self, Conflict, Entry, Job, JobKind, Locker, PreviewData, Retry, SortKey};
 use crate::scheme;
 use crate::shell::{self, ImageCache, Img, MenuResult};
@@ -217,7 +218,9 @@ pub fn prefetch_startup(start: Option<PathBuf>) {
     crate::images::start();
     let cfg = load_config();
     let (paths, active) = startup_tabs(&cfg, start);
-    let dir = paths.get(active).filter(|p| !crate::tab::is_virtual(p)).map(|p| normalize(p));
+    let dir = paths.get(active)
+        .filter(|p| !crate::tab::is_virtual(p) && folder_lock::required(p).is_ok_and(|locks| locks.is_empty()))
+        .map(|p| normalize(p));
     if let Some(d) = &dir {
         fsutil::prefetch(d.clone());
     }
@@ -234,6 +237,7 @@ pub fn prefetch_startup(start: Option<PathBuf>) {
                 .into_iter()
                 .flatten()
                 .flatten()
+                .filter(|de| !folder_lock::is_marker(Path::new(&de.file_name())))
                 .filter_map(|de| de.metadata().ok().map(|md| Entry::from_metadata(de.path(), &md)))
                 .filter(|e| show_hidden || !e.hidden)
                 .collect();
@@ -247,7 +251,7 @@ pub fn prefetch_startup(start: Option<PathBuf>) {
                 let (p, icon_only) = if level == 0 {
                     (px(18.0), true)
                 } else {
-                    (px(VIEW_LEVELS[level].0 as f32), e.is_dir || !fsutil::has_thumbnail(&e.ext))
+                    (px(VIEW_LEVELS[level].0 as f32), !e.thumbnail)
                 };
                 let key = if icon_only { icon_key(&e.path, e.is_dir, &e.ext, p, e.plain_dir) } else { format!("t{p}:{}", e.path.display()) };
                 if seen.insert(key) {
@@ -283,6 +287,7 @@ enum Action {
     Forward,
     Refresh,
     NewTab(PathBuf),
+    LoadTab,
     NewWindow,
     CloseTab(usize),
     Copy,
@@ -307,6 +312,7 @@ enum Action {
     NativeMenu { path: PathBuf, extended: bool },
     System(SysTool),
     CalcSize,
+    FolderPassword(PathBuf),
     AddBookmark(PathBuf),
     RemoveBookmark(PathBuf),
     StartSearch,
@@ -344,6 +350,29 @@ enum Dialog {
     #[cfg(not(windows))]
     Properties(Box<crate::properties::Properties>),
     Locked(Box<LockedDialog>),
+    FolderPassword(Box<FolderPasswordDialog>),
+}
+
+enum FolderPasswordMode {
+    Open { action: Action, tab: usize, verified: Vec<FolderLock>, lock: FolderLock },
+    Set,
+    Remove(FolderLock),
+}
+
+struct FolderPasswordDialog {
+    folder: PathBuf,
+    mode: FolderPasswordMode,
+    password: String,
+    confirmation: String,
+    error: Option<String>,
+    result: Option<std::sync::mpsc::Receiver<std::io::Result<bool>>>,
+    focus: bool,
+}
+
+impl FolderPasswordDialog {
+    fn new(folder: PathBuf, mode: FolderPasswordMode) -> Self {
+        Self { folder, mode, password: String::new(), confirmation: String::new(), error: None, result: None, focus: true }
+    }
 }
 
 /// Bir program açık tuttuğu için silinemeyen ya da taşınamayan öğeler
@@ -408,6 +437,7 @@ pub struct App {
     background: bool,
     /// Sonraki açılışları bu süreç karşılıyor; kapanınca gizlenip bekleyebilir
     resident: bool,
+    parked: bool,
     autostart: bool,
     previous_folder_app: Option<String>,
     /// Varsayılan dosya yöneticisi mi; menü ilk açılınca sorulur (Linux'ta bir süreç çalıştırır)
@@ -1216,10 +1246,16 @@ fn drop_target(ui: &egui::Ui, resp: &egui::Response, target: &Path, accent: Colo
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>, hidden: bool) -> App {
+        let app = Self::from_config(cc, start, hidden, load_config(), true);
+        app.refresh_drives();
+        app.watch_drives();
+        app
+    }
+
+    fn from_config(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>, hidden: bool, cfg: Config, connect: bool) -> App {
         let ctx = cc.egui_ctx.clone();
         setup_fonts(&ctx);
 
-        let cfg = load_config();
         let accent = theme_accent(cfg.theme);
         apply_lang(cfg.lang);
         load_cjk_fonts(&ctx);
@@ -1227,19 +1263,25 @@ impl App {
 
         let (paths, active) = startup_tabs(&cfg, start);
         let (subdirs_tx, subdirs_rx) = std::sync::mpsc::channel();
-        let resident = win::serve(ctx.clone());
+        let resident = connect && win::serve(ctx.clone());
         if resident && !crate::update::dev_build() {
             std::thread::spawn(win::refresh_default_file_manager);
         }
         let auto_update = Arc::new(AtomicBool::new(cfg.auto_update));
         // Aynı anda tek süreç güncellesin: sonraki açılışları karşılayan süreç
         let last_update_check = Arc::new(AtomicU64::new(cfg.last_update_check));
-        let checks_updates = (resident || !cfg!(windows)) && crate::update::enabled();
+        let checks_updates = connect && (resident || !cfg!(windows)) && crate::update::enabled();
         let (update_rx, update_wake) = spawn_update_checker(checks_updates.then(|| auto_update.clone()), last_update_check.clone(), ctx.clone());
         // Yalnızca etkin sekme hemen yüklenir; diğerleri ilk açıldıklarında
-        let tabs = paths.into_iter().enumerate().map(|(i, p)| if i == active { Tab::new(p, &ctx) } else { Tab::new_lazy(p) }).collect();
+        let tabs = paths.into_iter().enumerate().map(|(i, p)| {
+            if i == active && folder_lock::required(&p).is_ok_and(|locks| locks.is_empty()) {
+                Tab::new(p, &ctx)
+            } else {
+                Tab::new_lazy(p)
+            }
+        }).collect();
 
-        let app = App {
+        App {
             tabs,
             active,
             sort: cfg.sort,
@@ -1256,7 +1298,8 @@ impl App {
             grouped: cfg.grouped,
             background: cfg.background,
             resident,
-            autostart: win::autostart(),
+            parked: false,
+            autostart: connect && win::autostart(),
             previous_folder_app: cfg.previous_folder_app,
             default_fm: None,
             auto_update,
@@ -1315,10 +1358,7 @@ impl App {
             frames: 0,
             revealed: false,
             ctx,
-        };
-        app.refresh_drives();
-        app.watch_drives();
-        app
+        }
     }
 
     fn poll_update(&mut self) {
@@ -1456,7 +1496,16 @@ impl App {
 
     /// Kapatma: pencere gizlenir, süreç sonraki açılışı bekler
     fn park(&mut self, hwnd: isize) {
+        self.parked = true;
         self.renaming = None;
+        if matches!(self.dialog, Dialog::FolderPassword(_)) {
+            self.dialog = Dialog::None;
+        }
+        for tab in &mut self.tabs {
+            if !tab.folder_access.is_empty() {
+                tab.relock();
+            }
+        }
         self.save_config();
         win::park(hwnd);
     }
@@ -1464,12 +1513,24 @@ impl App {
     /// Gizliyken gelen açılış. Klasörle açıldıysa o sekmeye geçer, yoksa yeni sekmede açar.
     fn reopen(&mut self, start: Option<PathBuf>) {
         // Pencere yeni içerik hazır olana dek gizli kalsın, açılıştaki gibi
+        self.parked = false;
         self.revealed = false;
         self.frames = 0;
         self.started = Instant::now();
+        if matches!(self.dialog, Dialog::FolderPassword(_)) {
+            self.dialog = Dialog::None;
+        }
         if let Some(p) = start.map(|p| normalize(&p)).filter(|p| crate::tab::is_virtual(p) || p.is_dir()) {
             match self.tabs.iter().position(|t| t.path == p) {
-                Some(i) => self.active = i,
+                Some(i) => {
+                    self.active = i;
+                    if !self.tab().is_lazy() && folder_lock::required(&p).is_ok_and(|locks| !locks.is_empty()) {
+                        self.tab().relock();
+                    }
+                    if self.tab().is_lazy() {
+                        self.apply(Action::LoadTab);
+                    }
+                }
                 None => self.apply(Action::NewTab(p)),
             }
         }
@@ -1905,10 +1966,51 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        if matches!(self.dialog, Dialog::FolderPassword(_)) {
+            return;
+        }
+        self.apply_with_folder_access(action, Vec::new());
+    }
+
+    fn apply_with_folder_access(&mut self, action: Action, verified: Vec<FolderLock>) {
         let ctx = self.ctx.clone();
-        let busy_here = {
-            let t = &self.tabs[self.active];
-            t.is_home() || t.search.is_some()
+        if matches!(action, Action::LoadTab) {
+            self.tab().request_load();
+        }
+        let t = &self.tabs[self.active];
+        let busy_here = t.is_home() || t.search.is_some() || t.is_lazy();
+        let destination = match &action {
+            Action::Navigate(p) if crate::tab::is_virtual(p) || p.is_dir() => Some((p.clone(), false)),
+            Action::Navigate(p) if p.is_file() => Some((p.clone(), true)),
+            Action::OpenEntry(p, is_dir) => Some((p.clone(), !is_dir)),
+            Action::OpenWith(p) => Some((p.clone(), p.is_file())),
+            Action::NewTab(p) => Some((p.clone(), false)),
+            Action::LoadTab if t.is_lazy() => Some((t.path.clone(), false)),
+            Action::ToggleSplit if self.split.is_none() => Some((t.path.clone(), false)),
+            Action::Up => t.up_target().map(|p| (p, false)),
+            Action::Back => t.back.last().cloned().map(|p| (p, false)),
+            Action::Forward => t.forward.last().cloned().map(|p| (p, false)),
+            _ => None,
+        };
+        let access = if let Some((path, file)) = destination {
+            if folder_lock::is_marker(&path) {
+                return;
+            }
+            let locks = match folder_lock::required(&path) {
+                Ok(locks) => locks,
+                Err(e) => {
+                    self.toast(crate::i18n::tf("Klasör şifresi denetlenemedi: {}", &[&e]), true);
+                    return;
+                }
+            };
+            if let Some(lock) = locks.iter().find(|lock| !(verified.contains(lock) || file && t.folder_access.contains(lock))) {
+                let mode = FolderPasswordMode::Open { action, tab: self.active, verified, lock: lock.clone() };
+                self.dialog = Dialog::FolderPassword(Box::new(FolderPasswordDialog::new(lock.folder.clone(), mode)));
+                return;
+            }
+            locks
+        } else {
+            Vec::new()
         };
         match action {
             Action::Navigate(p) => {
@@ -1917,6 +2019,7 @@ impl App {
                 self.images.drop_pending();
                 if crate::tab::is_virtual(&p) || p.is_dir() {
                     self.tab().navigate(p, true, &ctx);
+                    self.tab().folder_access = access;
                 } else if p.is_file() {
                     let _ = open::that_detached(&p);
                 } else {
@@ -1928,30 +2031,45 @@ impl App {
                     self.renaming = None;
                     self.images.drop_pending();
                     self.tab().navigate(p, true, &ctx);
+                    self.tab().folder_access = access;
                 } else if let Err(e) = open::that_detached(&p) {
                     self.toast(crate::i18n::tf("Açılamadı: {}", &[&e]), true);
                 }
             }
             Action::OpenSelected => {
                 let sel: Vec<(PathBuf, bool)> = self.tab().selected_entries().iter().map(|e| (e.path.clone(), e.is_dir)).collect();
-                if let [(p, true)] = sel.as_slice() {
-                    self.apply(Action::OpenEntry(p.clone(), true));
+                if let [(p, is_dir)] = sel.as_slice() {
+                    self.apply(Action::OpenEntry(p.clone(), *is_dir));
                 } else {
                     for (p, is_dir) in sel.into_iter().take(32) {
                         if is_dir {
-                            self.tabs.push(Tab::new(p, &ctx));
+                            self.tabs.push(Tab::new_lazy(p));
                         } else {
-                            let _ = open::that_detached(&p);
+                            self.apply(Action::OpenEntry(p, false));
                         }
                     }
                 }
             }
             Action::Up => {
                 self.renaming = None;
+                let navigates = self.tab().up_target().is_some();
                 self.tab().go_up(&ctx);
+                if navigates {
+                    self.tab().folder_access = access;
+                }
             }
-            Action::Back => self.tab().go_back(&ctx),
-            Action::Forward => self.tab().go_forward(&ctx),
+            Action::Back => {
+                if !self.tab().back.is_empty() {
+                    self.tab().go_back(&ctx);
+                    self.tab().folder_access = access;
+                }
+            }
+            Action::Forward => {
+                if !self.tab().forward.is_empty() {
+                    self.tab().go_forward(&ctx);
+                    self.tab().folder_access = access;
+                }
+            }
             Action::Refresh => {
                 self.subdirs.clear();
                 self.git_branch.0 = PathBuf::new();
@@ -1963,8 +2081,16 @@ impl App {
                 self.refresh_drives();
             }
             Action::NewTab(p) => {
-                self.tabs.push(Tab::new(p, &ctx));
+                let mut t = Tab::new(p, &ctx);
+                t.folder_access = access;
+                self.tabs.push(t);
                 self.active = self.tabs.len() - 1;
+            }
+            Action::LoadTab => {
+                if self.tab().is_lazy() {
+                    self.tab().ensure_loaded(&ctx);
+                    self.tab().folder_access = access;
+                }
             }
             Action::NewWindow => {
                 if let Ok(exe) = std::env::current_exe() {
@@ -2085,7 +2211,9 @@ impl App {
             Action::ToggleSplit => {
                 if self.split.take().is_none() {
                     let p = self.tabs[self.active].path.clone();
-                    self.tabs.push(Tab::new(p, &ctx));
+                    let mut t = Tab::new(p, &ctx);
+                    t.folder_access = access;
+                    self.tabs.push(t);
                     self.split = Some([self.active, self.tabs.len() - 1]);
                     self.focus = 0;
                 }
@@ -2190,6 +2318,18 @@ impl App {
                     self.push_job(fsutil::spawn_sizes(dirs, sizes, ctx), false);
                 }
             }
+            Action::FolderPassword(p) => {
+                let p = normalize(&p);
+                if !crate::tab::is_virtual(&p) && p.is_dir() {
+                    match folder_lock::own_lock(&p) {
+                        Ok(lock) => {
+                            let mode = lock.map_or(FolderPasswordMode::Set, FolderPasswordMode::Remove);
+                            self.dialog = Dialog::FolderPassword(Box::new(FolderPasswordDialog::new(p, mode)));
+                        }
+                        Err(e) => self.toast(crate::i18n::tf("Klasör şifresi denetlenemedi: {}", &[&e]), true),
+                    }
+                }
+            }
             Action::AddBookmark(p) => {
                 if !p.as_os_str().is_empty() && !self.bookmarks.contains(&p) {
                     self.bookmarks.push(p);
@@ -2266,13 +2406,16 @@ fn path_label(p: &Path) -> String {
 impl App {
     /// Alt klasörler; henüz okunmadıysa okumayı başlatır ve şimdilik boş döner
     fn subdirs_cached(&mut self, dir: &Path) -> Arc<[PathBuf]> {
+        if folder_lock::has_marker(dir) {
+            return Arc::from([]);
+        }
         if let Some(v) = self.subdirs.get(dir) {
             return v.clone();
         }
         if self.subdirs_pending.insert(dir.to_path_buf()) {
             let (dir, hidden, tx, ctx) = (dir.to_path_buf(), self.show_hidden, self.subdirs_tx.clone(), self.ctx.clone());
             std::thread::spawn(move || {
-                let v = list_subdirs(&dir, hidden);
+                let v = if folder_lock::required(&dir).is_ok_and(|locks| locks.is_empty()) { list_subdirs(&dir, hidden) } else { vec![] };
                 let _ = tx.send((dir, hidden, v));
                 ctx.request_repaint();
             });
@@ -3088,6 +3231,10 @@ impl App {
         if toggled || r.double_clicked() {
             if open {
                 self.tree_open.remove(path);
+            } else if folder_lock::has_marker(path) {
+                if !r.clicked() {
+                    actions.push(Action::Navigate(path.to_path_buf()));
+                }
             } else {
                 self.tree_open.insert(path.to_path_buf());
             }
@@ -3113,6 +3260,7 @@ impl App {
                 actions.push(Action::AddBookmark(p.clone()));
                 ui.close_menu();
             }
+            menu_action(ui, actions, "", "Klasör şifresi…", Action::FolderPassword(p.clone()));
             if ui.button(crate::i18n::t("Özellikler")).clicked() {
                 actions.push(Action::Properties(p.clone()));
                 ui.close_menu();
@@ -3577,6 +3725,7 @@ fn item_menu(ui: &mut egui::Ui, path: &Path, is_dir: bool, in_search: bool, shel
     menu_action(ui, actions, g::OPEN, "Aç                              Enter", Action::OpenSelected);
     if is_dir {
         menu_action(ui, actions, g::NEW_TAB, "Yeni sekmede aç", Action::NewTab(path.to_path_buf()));
+        menu_action(ui, actions, "", "Klasör şifresi…", Action::FolderPassword(path.to_path_buf()));
         menu_action(ui, actions, g::PASTE, "Buraya yapıştır", Action::PasteInto(path.to_path_buf()));
     } else {
         menu_action(ui, actions, g::OPEN_WITH, "Birlikte aç…", Action::OpenWith(path.to_path_buf()));
@@ -3691,6 +3840,7 @@ fn background_menu(ui: &mut egui::Ui, current: &Path, in_search: bool, can_undo:
     ui.separator();
     if !in_search {
         menu_action(ui, actions, g::PASTE, "Yapıştır (Ctrl+V)", Action::Paste);
+        menu_action(ui, actions, "", "Klasör şifresi…", Action::FolderPassword(current.to_path_buf()));
         if can_undo {
             menu_action(ui, actions, g::UNDO, "Geri al                   Ctrl+Z", Action::Undo);
         }
@@ -3860,7 +4010,14 @@ impl App {
 
     fn pane(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = &self.tabs[self.active];
-        if t.lists_files() {
+        if t.is_lazy() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                if ui.button(crate::i18n::t("Klasörü aç")).clicked() {
+                    actions.push(Action::LoadTab);
+                }
+            });
+        } else if t.lists_files() {
             self.file_area(ui, actions);
         } else if t.is_pc() {
             self.pc_page(ui, actions);
@@ -4252,7 +4409,7 @@ impl App {
                         }
                         // Görsel
                         let img_rect = Rect::from_min_size(rect.min + egui::vec2((tile_w - size) / 2.0, 8.0), Vec2::splat(size));
-                        let thumb = !e.is_dir && fsutil::has_thumbnail(&e.ext);
+                        let thumb = e.thumbnail;
                         let (key, icon_only) = if thumb { (format!("t{px}:{}", e.path.display()), false) } else { (icon_key(&e.path, e.is_dir, &e.ext, px, e.plain_dir), true) };
                         let dim = e.hidden || cut_set.contains(&e.path);
                         let tint = if dim { Color32::from_white_alpha(130) } else { Color32::WHITE };
@@ -4337,11 +4494,11 @@ impl App {
         }
     }
 
-    fn preview_panel(&mut self, ui: &mut egui::Ui) {
+    fn preview_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let (sel, cur_path, count, home) = {
             let t = &self.tabs[self.active];
             let sel: Vec<Entry> = t.selected_entries().into_iter().cloned().collect();
-            (sel, t.path.clone(), t.view.len(), !t.lists_files())
+            (sel, t.path.clone(), t.view.len(), !t.lists_files() || t.is_lazy())
         };
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.add_space(8.0);
@@ -4365,7 +4522,7 @@ impl App {
             let ctx = ui.ctx().clone();
             let px = icon_px(&ctx, 200.0);
             let (is_dir, ext, plain) = entry.as_ref().map(|e| (e.is_dir, e.ext.clone(), e.plain_dir)).unwrap_or((true, String::new(), false));
-            let thumb = !is_dir && fsutil::has_thumbnail(&ext);
+            let thumb = entry.as_ref().is_some_and(|e| e.thumbnail);
             let key = if thumb { format!("t{px}:{}", path.display()) } else { icon_key(&path, is_dir, &ext, px, plain) };
             ui.vertical_centered(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(260.0), 200.0), Sense::hover());
@@ -4382,7 +4539,7 @@ impl App {
             let Some(e) = entry else { return };
             ui.add_space(10.0);
             if !e.is_dir && ui.add_sized([ui.available_width(), 30.0], egui::Button::new(crate::i18n::t("Aç"))).clicked() {
-                let _ = open::that_detached(&e.path);
+                actions.push(Action::OpenEntry(e.path.clone(), false));
             }
             ui.add_space(8.0);
             ui.label(RichText::new(crate::i18n::t("Özellikler")).strong());
@@ -4416,8 +4573,15 @@ impl App {
                 let store = self.preview.data.clone();
                 let p = e.path.clone();
                 let show_hidden = self.show_hidden;
+                let access = self.tabs[self.active].folder_access.clone();
                 std::thread::spawn(move || {
-                    let d = if e.is_dir { fsutil::read_folder_preview(&p, show_hidden, 200) } else { fsutil::read_preview(&p) };
+                    let d = if !folder_lock::required(&p).is_ok_and(|locks| locks.iter().all(|lock| access.contains(lock))) {
+                        PreviewData::Error(crate::i18n::t("Bu klasör şifreyle kilitli.").into())
+                    } else if e.is_dir {
+                        fsutil::read_folder_preview(&p, show_hidden, 200)
+                    } else {
+                        fsutil::read_preview(&p)
+                    };
                     *store.lock().unwrap() = Some((p, d));
                     ctx.request_repaint();
                 });
@@ -4918,9 +5082,14 @@ impl App {
 
     fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let mut dialog = std::mem::replace(&mut self.dialog, Dialog::None);
+        if let Dialog::FolderPassword(prompt) = dialog {
+            self.folder_password_dialog(ctx, *prompt);
+            return;
+        }
         let mut keep = true;
         match &mut dialog {
             Dialog::None => keep = false,
+            Dialog::FolderPassword(_) => unreachable!(),
             Dialog::ConfirmDelete { paths } => {
                 let resp = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
                     ui.set_width(440.0);
@@ -5147,6 +5316,140 @@ impl App {
             self.dialog = dialog;
         }
     }
+
+    fn folder_password_dialog(&mut self, ctx: &egui::Context, mut prompt: FolderPasswordDialog) {
+        use crate::i18n::{t, tf};
+
+        let result = prompt.result.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(e) => Some(Err(std::io::Error::other(e))),
+        });
+        if let Some(result) = result {
+            prompt.result = None;
+            match result {
+                Ok(true) => {
+                    match prompt.mode {
+                        FolderPasswordMode::Open { action, tab, mut verified, lock } => {
+                            if self.active == tab {
+                                verified.push(lock);
+                                self.apply_with_folder_access(action, verified);
+                            }
+                        }
+                        FolderPasswordMode::Set | FolderPasswordMode::Remove(_) => {
+                            for tab in &mut self.tabs {
+                                if !tab.is_lazy() && folder_lock::required(&tab.path).is_ok_and(|locks| locks.iter().any(|lock| !tab.folder_access.contains(lock))) {
+                                    tab.relock();
+                                } else {
+                                    tab.exit_search(ctx);
+                                }
+                            }
+                            self.renaming = None;
+                            self.preview = Preview { path: None, data: Arc::new(Mutex::new(None)) };
+                            self.subdirs.clear();
+                            if matches!(prompt.mode, FolderPasswordMode::Set) {
+                                self.recent.retain(|path| folder_lock::required(path).is_ok_and(|locks| locks.is_empty()));
+                            }
+                            self.toast(t(if matches!(prompt.mode, FolderPasswordMode::Set) { "Klasör şifresi ayarlandı." } else { "Klasör şifresi kaldırıldı." }), false);
+                            ctx.request_repaint();
+                        }
+                    }
+                    return;
+                }
+                Ok(false) => prompt.error = Some(t("Şifre yanlış.").into()),
+                Err(e) => prompt.error = Some(tf("Klasör şifresi işlemi başarısız: {}", &[&e])),
+            }
+            prompt.focus = true;
+        }
+
+        let (title, submit) = match prompt.mode {
+            FolderPasswordMode::Open { .. } => ("Klasör şifresini gir", "Aç"),
+            FolderPasswordMode::Set => ("Klasöre şifre koy", "Uygula"),
+            FolderPasswordMode::Remove(_) => ("Klasör şifresini kaldır", "Uygula"),
+        };
+        let setting = matches!(prompt.mode, FolderPasswordMode::Set);
+        let busy = prompt.result.is_some();
+        let id = egui::Id::new("folder_password");
+        let password_id = id.with("password");
+        let confirmation_id = id.with("confirmation");
+        let resp = egui::Modal::new(id).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(t(title));
+            ui.add(egui::Label::new(path_label(&prompt.folder)).wrap());
+            if setting {
+                ui.label(RichText::new(t("Şifre yalnızca Swift Explorer'da sorulur.")).weak());
+            }
+            ui.add_space(8.0);
+            let edit = |ui: &mut egui::Ui, text: &mut String, field, hint| {
+                ui.add_enabled(!busy, egui::TextEdit::singleline(text).id(field).password(true).char_limit(256).desired_width(f32::INFINITY).hint_text(t(hint)))
+            };
+            let password = edit(ui, &mut prompt.password, password_id, "Şifre");
+            if std::mem::take(&mut prompt.focus) {
+                password.request_focus();
+            }
+            if setting {
+                edit(ui, &mut prompt.confirmation, confirmation_id, "Şifreyi tekrar gir");
+            }
+            if let Some(error) = &prompt.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let cancel = ui.add_enabled(!busy, egui::Button::new(t("Vazgeç"))).clicked();
+                let submit = ui.add_enabled(!busy, egui::Button::new(t(submit))).clicked();
+                if busy {
+                    ui.spinner();
+                }
+                (cancel, submit || !busy && ui.input(|i| i.key_pressed(Key::Enter)))
+            }).inner
+        });
+        let (cancel, submit) = resp.inner;
+        if !busy && (cancel || resp.should_close()) {
+            egui::TextEdit::store_state(ctx, password_id, Default::default());
+            egui::TextEdit::store_state(ctx, confirmation_id, Default::default());
+            return;
+        }
+        if submit {
+            let error = if prompt.password.is_empty() {
+                Some("Şifre girin.")
+            } else if setting && prompt.password != prompt.confirmation {
+                Some("Şifreler eşleşmiyor.")
+            } else {
+                None
+            };
+            prompt.error = error.map(|e| t(e).into());
+            if error.is_none() {
+                let (lock, remove) = match &prompt.mode {
+                    FolderPasswordMode::Open { lock, .. } => (Some(lock.clone()), false),
+                    FolderPasswordMode::Remove(lock) => (Some(lock.clone()), true),
+                    FolderPasswordMode::Set => (None, false),
+                };
+                let password = std::mem::take(&mut prompt.password);
+                prompt.confirmation.clear();
+                egui::TextEdit::store_state(ctx, password_id, Default::default());
+                egui::TextEdit::store_state(ctx, confirmation_id, Default::default());
+                let folder = prompt.folder.clone();
+                let ctx = ctx.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                prompt.result = Some(rx);
+                std::thread::spawn(move || {
+                    let result = if let Some(lock) = lock {
+                        lock.verify(&password).and_then(|valid| {
+                            if valid && remove {
+                                lock.remove()?;
+                            }
+                            Ok(valid)
+                        })
+                    } else {
+                        folder_lock::create(&folder, &password).map(|()| true)
+                    };
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
+            }
+        }
+        self.dialog = Dialog::FolderPassword(Box::new(prompt));
+    }
 }
 
 fn fmt_secs(s: f64) -> String {
@@ -5279,7 +5582,9 @@ impl eframe::App for App {
             crate::update::confirm_started();
         }
 
-        self.tabs[self.active].ensure_loaded(ctx);
+        if !self.parked && matches!(self.dialog, Dialog::None) && self.tab().request_load() {
+            self.apply(Action::LoadTab);
+        }
         self.poll_subdirs();
         for t in &mut self.tabs {
             t.poll(ctx);
@@ -5305,7 +5610,7 @@ impl eframe::App for App {
         }
         // Son klasörler
         let cur = self.tabs[self.active].path.clone();
-        if !crate::tab::is_virtual(&cur) && self.recent.first() != Some(&cur) {
+        if !crate::tab::is_virtual(&cur) && self.tabs[self.active].folder_access.is_empty() && !self.tabs[self.active].is_lazy() && self.recent.first() != Some(&cur) {
             self.recent.retain(|p| p != &cur);
             self.recent.insert(0, cur);
             self.recent.truncate(30);
@@ -5410,7 +5715,7 @@ impl eframe::App for App {
         });
         if self.show_preview {
             egui::SidePanel::right("preview").resizable(true).default_width(320.0).width_range(220.0..=900.0).frame(egui::Frame::new().fill(pl.content).inner_margin(12)).show(ctx, |ui| {
-                self.preview_panel(ui);
+                self.preview_panel(ui, &mut actions);
             });
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pl.content).inner_margin(egui::Margin { left: 6, right: 4, top: 2, bottom: 0 })).show(ctx, |ui| {
@@ -5493,5 +5798,72 @@ impl eframe::App for App {
             t.cancel_search();
         }
         self.save_config();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn submit_folder_password(app: &mut App, password: &str) {
+        let ctx = app.ctx.clone();
+        let Dialog::FolderPassword(prompt) = &mut app.dialog else { panic!("password prompt is missing") };
+        prompt.password = password.into();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.dialogs(ctx, &mut Vec::new()));
+        let Dialog::FolderPassword(prompt) = &mut app.dialog else { panic!("password prompt closed before validation") };
+        let result = prompt.result.take().unwrap().recv_timeout(Duration::from_secs(30)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(result).unwrap();
+        prompt.result = Some(rx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.dialogs(ctx, &mut Vec::new()));
+    }
+
+    #[test]
+    fn navigation_prompts_again_after_leaving_a_locked_folder() {
+        let root = std::env::temp_dir().join(format!("swift-explorer-password-navigation-{}", std::process::id()));
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("secret.txt"), b"secret").unwrap();
+        folder_lock::create(&locked, "folder password").unwrap();
+
+        let cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut app = App::from_config(&cc, Some(locked.clone()), false, Config::default(), false);
+        assert!(app.tab().is_lazy());
+        assert!(app.tab().entries.is_empty());
+        app.apply(Action::LoadTab);
+        submit_folder_password(&mut app, "wrong password");
+        assert!(app.tab().is_lazy());
+        assert!(app.tab().entries.is_empty());
+        assert!(matches!(&app.dialog, Dialog::FolderPassword(prompt) if prompt.error.is_some()));
+        submit_folder_password(&mut app, "folder password");
+        assert!(matches!(app.dialog, Dialog::None));
+        assert_eq!(app.tab().path, locked);
+        assert!(!app.tab().is_lazy());
+
+        app.apply(Action::Up);
+        app.apply(Action::Back);
+        assert_eq!(app.tab().path, root);
+        assert!(matches!(app.dialog, Dialog::FolderPassword(_)));
+
+        app.dialog = Dialog::None;
+        app.apply(Action::FolderPassword(locked.clone()));
+        submit_folder_password(&mut app, "folder password");
+        assert!(folder_lock::own_lock(&locked).unwrap().is_none());
+        app.apply(Action::Navigate(locked.clone()));
+        assert_eq!(app.tab().path, locked);
+
+        app.apply(Action::FolderPassword(locked.clone()));
+        let Dialog::FolderPassword(prompt) = &mut app.dialog else { panic!("password setup is missing") };
+        prompt.confirmation = "folder password".into();
+        submit_folder_password(&mut app, "folder password");
+        assert!(matches!(app.dialog, Dialog::None));
+        assert!(app.tab().is_lazy());
+        assert!(app.tab().entries.is_empty());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

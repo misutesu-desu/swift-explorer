@@ -1,6 +1,22 @@
 //! Bu dilin metinleri; anahtarlar i18n.rs'teki Türkçe metinlerdir.
 
 pub static TABLE: &[(&str, &str)] = &[
+    ("Klasör şifresi…", "フォルダーのパスワード…"),
+    ("Klasör şifresini gir", "フォルダーのパスワードを入力"),
+    ("Klasöre şifre koy", "フォルダーのパスワードを設定"),
+    ("Klasör şifresini kaldır", "フォルダーのパスワードを解除"),
+    ("Şifre", "パスワード"),
+    ("Şifreyi tekrar gir", "パスワードを再入力"),
+    ("Şifre girin.", "パスワードを入力してください。"),
+    ("Şifreler eşleşmiyor.", "パスワードが一致しません。"),
+    ("Şifre yanlış.", "パスワードが違います。"),
+    ("Şifre yalnızca Swift Explorer'da sorulur.", "このパスワードを求めるのは Swift Explorer だけです。"),
+    ("Klasör şifresi ayarlandı.", "フォルダーのパスワードを設定しました。"),
+    ("Klasör şifresi kaldırıldı.", "フォルダーのパスワードを解除しました。"),
+    ("Klasör şifresi denetlenemedi: {}", "フォルダーのパスワードを確認できませんでした: {}"),
+    ("Klasör şifresi işlemi başarısız: {}", "フォルダーのパスワードの処理に失敗しました: {}"),
+    ("Bu klasör şifreyle kilitli.", "このフォルダーはパスワードで保護されています。"),
+    ("Klasörü aç", "フォルダーを開く"),
     ("Ayrıntılar", "詳細"),
     ("Küçük simgeler", "小アイコン"),
     ("Orta simgeler", "中アイコン"),

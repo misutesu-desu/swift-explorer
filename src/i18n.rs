@@ -160,6 +160,22 @@ fn replace_count(s: String, many: &str, one: &str) -> String {
 }
 
 static TABLE: &[(&str, &str)] = &[
+    ("Klasör şifresi…", "Folder password…"),
+    ("Klasör şifresini gir", "Enter folder password"),
+    ("Klasöre şifre koy", "Set folder password"),
+    ("Klasör şifresini kaldır", "Remove folder password"),
+    ("Şifre", "Password"),
+    ("Şifreyi tekrar gir", "Re-enter password"),
+    ("Şifre girin.", "Enter a password."),
+    ("Şifreler eşleşmiyor.", "The passwords do not match."),
+    ("Şifre yanlış.", "Incorrect password."),
+    ("Şifre yalnızca Swift Explorer'da sorulur.", "Only Swift Explorer asks for this password."),
+    ("Klasör şifresi ayarlandı.", "Folder password set."),
+    ("Klasör şifresi kaldırıldı.", "Folder password removed."),
+    ("Klasör şifresi denetlenemedi: {}", "Couldn't check the folder password: {}"),
+    ("Klasör şifresi işlemi başarısız: {}", "Folder password operation failed: {}"),
+    ("Bu klasör şifreyle kilitli.", "This folder is password protected."),
+    ("Klasörü aç", "Open folder"),
     ("Ayrıntılar", "Details"),
     ("Küçük simgeler", "Small icons"),
     ("Orta simgeler", "Medium icons"),

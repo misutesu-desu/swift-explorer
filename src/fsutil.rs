@@ -61,6 +61,7 @@ pub struct Entry {
     pub created: Option<SystemTime>,
     pub hidden: bool,
     pub ext: String,
+    pub thumbnail: bool,
     /// Sıradan klasör: ikonu standart klasör ikonudur, tüm bu klasörler tek ikonu paylaşır.
     /// Windows klasöre özel ikonu (desktop.ini) yalnızca salt okunur ya da sistem
     /// özniteliği varsa uygular; bağlantı noktaları da ayrı tutulur.
@@ -80,6 +81,8 @@ impl Entry {
         } else {
             path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
         };
+        let thumbnail = !is_dir && has_thumbnail(&ext)
+            && (attrs & ATTR_REPARSE == 0 || crate::folder_lock::required(&path).is_ok_and(|locks| locks.is_empty()));
         Entry {
             name_lower: name.to_lowercase(),
             name,
@@ -90,6 +93,7 @@ impl Entry {
             created: md.created().ok(),
             hidden: is_hidden_attr(attrs),
             ext,
+            thumbnail,
             plain_dir: cfg!(windows) && is_dir && attrs & (ATTR_READONLY | ATTR_SYSTEM | ATTR_REPARSE) == 0,
         }
     }
@@ -360,6 +364,9 @@ fn spawn_load_with(path: PathBuf, repaint: impl Fn() + Send + 'static) -> Receiv
         let mut batch = Vec::with_capacity(1024);
         let mut last = Instant::now();
         for de in rd.flatten() {
+            if crate::folder_lock::is_marker(Path::new(&de.file_name())) {
+                continue;
+            }
             if let Ok(md) = de.metadata() {
                 batch.push(Entry::from_metadata(de.path(), &md));
             }
@@ -391,21 +398,22 @@ pub struct SearchHandle {
     pub scanned: Arc<AtomicU64>,
 }
 
-pub fn spawn_search(roots: Vec<PathBuf>, pattern: Pattern, ctx: egui::Context) -> SearchHandle {
+pub fn spawn_search(roots: Vec<PathBuf>, pattern: Pattern, root_open: bool, ctx: egui::Context) -> SearchHandle {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let scanned = Arc::new(AtomicU64::new(0));
     let (c, s) = (cancel.clone(), scanned.clone());
     thread::spawn(move || {
-        roots.par_iter().for_each(|r| search_dir(r, &pattern, &tx, &c, &s));
+        roots.par_iter().filter(|r| root_open || crate::folder_lock::required(r).is_ok_and(|locks| locks.is_empty()))
+            .for_each(|r| search_dir(r, root_open, &pattern, &tx, &c, &s));
         let _ = tx.send(SearchMsg::Done);
         ctx.request_repaint();
     });
     SearchHandle { rx, cancel, scanned }
 }
 
-fn search_dir(dir: &Path, pat: &Pattern, tx: &Sender<SearchMsg>, cancel: &AtomicBool, scanned: &AtomicU64) {
-    if cancel.load(Relaxed) {
+fn search_dir(dir: &Path, open: bool, pat: &Pattern, tx: &Sender<SearchMsg>, cancel: &AtomicBool, scanned: &AtomicU64) {
+    if cancel.load(Relaxed) || !open && crate::folder_lock::has_marker(dir) {
         return;
     }
     let Ok(rd) = fs::read_dir(dir) else { return };
@@ -413,13 +421,16 @@ fn search_dir(dir: &Path, pat: &Pattern, tx: &Sender<SearchMsg>, cancel: &Atomic
     let mut found = Vec::new();
     let mut subdirs = Vec::new();
     for de in rd.flatten() {
+        let name = de.file_name();
+        if crate::folder_lock::is_marker(Path::new(&name)) {
+            continue;
+        }
         let Ok(md) = de.metadata() else { continue };
         let path = de.path();
         let attrs = attributes(&path, &md);
         if attrs & ATTR_DIR != 0 && attrs & ATTR_REPARSE == 0 {
             subdirs.push(path.clone());
         }
-        let name = de.file_name();
         if pat.matches(&name.to_string_lossy().to_lowercase()) {
             found.push(Entry::from_metadata(path, &md));
         }
@@ -428,7 +439,7 @@ fn search_dir(dir: &Path, pat: &Pattern, tx: &Sender<SearchMsg>, cancel: &Atomic
         cancel.store(true, Relaxed);
         return;
     }
-    subdirs.par_iter().for_each(|d| search_dir(d, pat, tx, cancel, scanned));
+    subdirs.par_iter().for_each(|d| search_dir(d, false, pat, tx, cancel, scanned));
 }
 
 // ---------------------------------------------------------------- klasör boyutu
@@ -1038,6 +1049,7 @@ pub fn read_folder_preview(path: &Path, show_hidden: bool, limit: usize) -> Prev
     };
     let mut items: Vec<Entry> = rd
         .flatten()
+        .filter(|d| !crate::folder_lock::is_marker(Path::new(&d.file_name())))
         .filter_map(|d| Some(Entry::from_metadata(d.path(), &d.metadata().ok()?)))
         .filter(|e| show_hidden || !e.hidden)
         .collect();
@@ -1303,12 +1315,35 @@ mod tests {
         assert_eq!(names, ["z klasör", "a2.txt", "a10.txt"]);
         fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn search_skips_locked_contents_until_that_folder_is_open() {
+        let root = std::env::temp_dir().join(format!("swift-explorer-search-password-{}", std::process::id()));
+        let locked = root.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(root.join("visible.txt"), b"visible").unwrap();
+        fs::write(locked.join("secret.txt"), b"secret").unwrap();
+        crate::folder_lock::create(&locked, "password").unwrap();
+
+        let search = |folder: PathBuf| {
+            let handle = spawn_search(vec![folder], Pattern::new("*.txt"), true, egui::Context::default());
+            let mut names = Vec::new();
+            while let SearchMsg::Batch(entries) = handle.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                names.extend(entries.into_iter().map(|entry| entry.name));
+            }
+            names
+        };
+        assert_eq!(search(root.clone()), ["visible.txt"]);
+        assert_eq!(search(locked), ["secret.txt"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn top_extensions_counts_files_only() {
         let e = |name: &str, is_dir: bool| {
             let path = PathBuf::from(name);
             let ext = if is_dir { String::new() } else { path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default() };
-            Entry { name: name.into(), name_lower: name.to_lowercase(), path, is_dir, size: 0, modified: None, created: None, hidden: false, ext, plain_dir: false }
+            Entry { name: name.into(), name_lower: name.to_lowercase(), path, is_dir, size: 0, modified: None, created: None, hidden: false, ext, thumbnail: false, plain_dir: false }
         };
         let list = [e("a.pdf", false), e("b.PDF", false), e("c.txt", false), e("d.zip", false), e("klasor.pdf", true), e("README", false)];
         assert_eq!(top_extensions(&list, 2), [("pdf".to_string(), 2), ("txt".to_string(), 1)]);

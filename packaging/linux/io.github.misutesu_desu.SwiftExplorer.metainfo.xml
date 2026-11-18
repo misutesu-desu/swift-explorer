@@ -41,6 +41,15 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.10.0" date="2026-11-18">
+      <description>
+        <p>Set a folder password from its context menu. Swift Explorer asks for the password each time the folder is opened.</p>
+        <ul>
+          <li>Search and previews skip locked contents until the folder is opened with its password.</li>
+          <li>The lock stays with the folder when renamed. Other apps can still access the files.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.9.0" date="2026-11-07">
       <description>
         <p>A right-click menu for This PC, and the program holding a file is shown when a delete or move fails.</p>
