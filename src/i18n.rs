@@ -9,6 +9,7 @@ mod ja;
 mod pt;
 mod ru;
 mod zh;
+mod zh_tw;
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -27,6 +28,7 @@ pub const LANGS: &[(&str, &str)] = &[
     ("ru", "Русский"),
     ("zh", "简体中文"),
     ("ja", "日本語"),
+    ("zh-TW", "繁體中文"),
 ];
 
 const EN: usize = 1;
@@ -44,9 +46,17 @@ pub fn lang_code() -> &'static str {
 
 /// "de", "pt_BR.UTF-8", "zh-CN" gibi bir dil kodunun `LANGS` içindeki sırası
 pub fn lang_index(code: &str) -> Option<usize> {
-    let code = code.to_ascii_lowercase();
-    if code.starts_with("zh") && !(code.starts_with("zh_cn") || code.starts_with("zh-cn") || code.starts_with("zh_sg") || code.starts_with("zh-sg") || code == "zh") {
-        return None; // Geleneksel Çince için Basitleştirilmiş Çince yerine İngilizce
+    let code = code.to_ascii_lowercase().replace('_', "-");
+    let locale = code.split(['.', '@']).next().unwrap_or(&code);
+    if locale == "zh" || locale.starts_with("zh-") {
+        let language = if locale == "zh" || locale == "zh-cn" || locale == "zh-sg" || locale == "zh-hans" || locale.starts_with("zh-hans-") {
+            "zh"
+        } else if matches!(locale, "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant") || locale.starts_with("zh-hant-") {
+            "zh-TW"
+        } else {
+            return None;
+        };
+        return LANGS.iter().position(|(c, _)| *c == language);
     }
     LANGS.iter().position(|(c, _)| code.starts_with(c))
 }
@@ -70,6 +80,7 @@ pub fn system_lang() -> usize {
         (0x16, _) => "pt",
         (0x19, _) => "ru",
         (0x04, 0x0804 | 0x1004) => "zh",
+        (0x04, 0x0404 | 0x0C04 | 0x1404) => "zh-TW",
         (0x11, _) => "ja",
         _ => "en",
     };
@@ -79,7 +90,7 @@ pub fn system_lang() -> usize {
 fn tables() -> &'static [HashMap<&'static str, &'static str>] {
     static MAPS: OnceLock<Vec<HashMap<&'static str, &'static str>>> = OnceLock::new();
     MAPS.get_or_init(|| {
-        let tables: &[&[(&str, &str)]] = &[&[], TABLE, de::TABLE, es::TABLE, fr::TABLE, pt::TABLE, ru::TABLE, zh::TABLE, ja::TABLE];
+        let tables: &[&[(&str, &str)]] = &[&[], TABLE, de::TABLE, es::TABLE, fr::TABLE, pt::TABLE, ru::TABLE, zh::TABLE, ja::TABLE, zh_tw::TABLE];
         tables.iter().map(|t| t.iter().copied().collect()).collect()
     })
 }
@@ -598,7 +609,14 @@ mod tests {
         assert_eq!(lang_index("en_US.UTF-8"), Some(1));
         assert_eq!(lang_index("pt_BR.UTF-8"), Some(5));
         assert_eq!(lang_index("zh_CN.UTF-8"), Some(7));
-        assert_eq!(lang_index("zh_TW.UTF-8"), None);
+        assert_eq!(lang_index("zh_TW.UTF-8"), Some(9));
+        assert_eq!(lang_index("zh-TW"), Some(9));
+        assert_eq!(lang_index("zh-Hant"), Some(9));
+        assert_eq!(lang_index("zh-Hant-HK"), Some(9));
+        assert_eq!(lang_index("zh_HK.UTF-8"), Some(9));
+        assert_eq!(lang_index("zh-MO"), Some(9));
+        assert_eq!(lang_index("zh-Hans-CN"), Some(7));
+        assert_eq!(lang_index("zh_SG.UTF-8"), Some(7));
         assert_eq!(lang_index("C.UTF-8"), None);
     }
 }
