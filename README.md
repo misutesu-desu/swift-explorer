@@ -58,7 +58,7 @@ Releases after 0.2.0 also include `swift-explorer.flatpak`, which installs with 
 - When a file with the same name already exists, it asks whether to replace, skip or keep both.
 - Folders update live when files change on disk.
 - Downloads is grouped by date modified (Today, Yesterday, Last week…), like in Explorer. Other folders can be grouped from Sort > Group by.
-- Interface in English, Turkish, German, Spanish, French, Brazilian Portuguese, Russian, Simplified Chinese and Japanese. The language follows Windows and can be changed from View > Language.
+- Interface in English, Turkish, German, Spanish, French, Brazilian Portuguese, Russian, Simplified Chinese, Japanese and Italian. The language follows Windows and can be changed from View > Language.
 - Chinese, Japanese and Korean file names display with the system's CJK fonts.
 
 | Details | This PC |
@@ -99,7 +99,7 @@ Each language is one file in [`src/i18n/`](src/i18n). To add one, copy `de.rs`, 
 
 ## Settings
 
-Settings are stored in `%APPDATA%\SwiftExplorer\config.json` on Windows and `~/.config/SwiftExplorer/config.json` on Linux. Setting the `SWIFT_EXPLORER_LANG` environment variable to a language code (`en`, `tr`, `de`, `es`, `fr`, `pt`, `ru`, `zh`, `ja`) overrides the language setting.
+Settings are stored in `%APPDATA%\SwiftExplorer\config.json` on Windows and `~/.config/SwiftExplorer/config.json` on Linux. Setting the `SWIFT_EXPLORER_LANG` environment variable to a language code (`en`, `tr`, `de`, `es`, `fr`, `pt`, `ru`, `zh`, `ja`, `it`) overrides the language setting.
 
 ## Known limitations
 

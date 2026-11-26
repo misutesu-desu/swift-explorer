@@ -5,6 +5,7 @@
 mod de;
 mod es;
 mod fr;
+mod it;
 mod ja;
 mod pt;
 mod ru;
@@ -27,6 +28,7 @@ pub const LANGS: &[(&str, &str)] = &[
     ("ru", "Русский"),
     ("zh", "简体中文"),
     ("ja", "日本語"),
+    ("it", "Italiano"),
 ];
 
 const EN: usize = 1;
@@ -71,6 +73,7 @@ pub fn system_lang() -> usize {
         (0x19, _) => "ru",
         (0x04, 0x0804 | 0x1004) => "zh",
         (0x11, _) => "ja",
+        (0x10, _) => "it",
         _ => "en",
     };
     lang_index(code).unwrap_or(EN)
@@ -79,7 +82,7 @@ pub fn system_lang() -> usize {
 fn tables() -> &'static [HashMap<&'static str, &'static str>] {
     static MAPS: OnceLock<Vec<HashMap<&'static str, &'static str>>> = OnceLock::new();
     MAPS.get_or_init(|| {
-        let tables: &[&[(&str, &str)]] = &[&[], TABLE, de::TABLE, es::TABLE, fr::TABLE, pt::TABLE, ru::TABLE, zh::TABLE, ja::TABLE];
+        let tables: &[&[(&str, &str)]] = &[&[], TABLE, de::TABLE, es::TABLE, fr::TABLE, pt::TABLE, ru::TABLE, zh::TABLE, ja::TABLE, it::TABLE];
         tables.iter().map(|t| t.iter().copied().collect()).collect()
     })
 }
@@ -137,6 +140,18 @@ fn singular(s: String) -> String {
         "es" => &[("1 elementos seleccionados", "1 elemento seleccionado"), ("1 elementos", "1 elemento"), ("1 archivos", "1 archivo"), ("1 carpetas", "1 carpeta")],
         "fr" => &[("1 éléments sélectionnés", "1 élément sélectionné"), ("1 éléments", "1 élément"), ("1 fichiers", "1 fichier"), ("1 dossiers", "1 dossier")],
         "pt" => &[("1 itens selecionados", "1 item selecionado"), ("1 itens", "1 item"), ("1 arquivos", "1 arquivo"), ("1 pastas", "1 pasta")],
+        "it" => &[
+            ("1 elementi selezionati", "1 elemento selezionato"),
+            ("1 elementi copiati", "1 elemento copiato"),
+            ("1 elementi tagliati", "1 elemento tagliato"),
+            ("1 elementi spostati", "1 elemento spostato"),
+            ("1 elementi rinominati", "1 elemento rinominato"),
+            ("1 elementi verranno rinominati", "1 elemento verrà rinominato"),
+            ("1 elementi", "1 elemento"),
+            ("1 cartelle", "1 cartella"),
+            ("1 nomi", "1 nome"),
+            ("1 errori", "1 errore"),
+        ],
         _ => return s,
     };
     rules.iter().fold(s, |s, (many, one)| replace_count(s, many, one))
@@ -590,6 +605,8 @@ mod tests {
         assert_eq!(singular("11 items".into()), "11 items");
         set_lang(lang_index("es").unwrap());
         assert_eq!(singular("1 elementos seleccionados".into()), "1 elemento seleccionado");
+        set_lang(lang_index("it").unwrap());
+        assert_eq!(singular("1 elementi copiati — 21 elementi, 1 cartelle".into()), "1 elemento copiato — 21 elementi, 1 cartella");
         set_lang(0);
     }
 
@@ -599,6 +616,7 @@ mod tests {
         assert_eq!(lang_index("pt_BR.UTF-8"), Some(5));
         assert_eq!(lang_index("zh_CN.UTF-8"), Some(7));
         assert_eq!(lang_index("zh_TW.UTF-8"), None);
+        assert_eq!(lang_index("it_IT.UTF-8"), Some(9));
         assert_eq!(lang_index("C.UTF-8"), None);
     }
 }
